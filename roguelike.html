@@ -259,12 +259,12 @@ function requiredStairDist(depth) { return 8 + Math.floor(depth * 1.5); }
 // introduced ALONE; `weight` drives the mix on later floors. hp/damage here are
 // depth-1 bases; enemyHpScale/enemyDmgScale grow them on separate curves.
 const ENEMY_TYPES = {
-  grunt:  { id: "grunt",  glyph: "g", color: "#ff6b6b", hp: 6,  damage: 2, speed: 100, sight: 8, behavior: "melee",  debut: 1, weight: 10, threat: 1 },
-  hound:  { id: "hound",  glyph: "h", color: "#ffa94d", hp: 4,  damage: 2, speed: 165, sight: 9, behavior: "melee",  debut: 2, weight: 9,  threat: 1.5 },
-  brute:  { id: "brute",  glyph: "B", color: "#c92a2a", hp: 15, damage: 4, speed: 65,  sight: 7, behavior: "melee",  debut: 3, weight: 6,  threat: 3 },
-  archer: { id: "archer", glyph: "a", color: "#63e6be", hp: 6,  damage: 3, speed: 100, sight: 9, behavior: "ranged", debut: 4, weight: 6,  threat: 2.5, rangeMin: 3, rangeMax: 6 },
-  imp:    { id: "imp",    glyph: "i", color: "#da77f2", hp: 5,  damage: 2, speed: 120, sight: 9, behavior: "flee",   debut: 5, weight: 6,  threat: 1 },
-  warden: { id: "warden", glyph: "W", color: "#f783ac", hp: 20, damage: 6, speed: 95,  sight: 9, behavior: "melee",  debut: 7, weight: 4,  threat: 5 },
+  grunt:  { id: "grunt",  name: "Grunt",  glyph: "g", color: "#ff6b6b", hp: 6,  damage: 2, speed: 100, sight: 8, behavior: "melee",  debut: 1, weight: 10, threat: 1 },
+  hound:  { id: "hound",  name: "Hound",  glyph: "h", color: "#ffa94d", hp: 4,  damage: 2, speed: 165, sight: 9, behavior: "melee",  debut: 2, weight: 9,  threat: 1.5 },
+  brute:  { id: "brute",  name: "Brute",  glyph: "B", color: "#c92a2a", hp: 15, damage: 4, speed: 65,  sight: 7, behavior: "melee",  debut: 3, weight: 6,  threat: 3 },
+  archer: { id: "archer", name: "Archer", glyph: "a", color: "#63e6be", hp: 6,  damage: 3, speed: 100, sight: 9, behavior: "ranged", debut: 4, weight: 6,  threat: 2.5, rangeMin: 3, rangeMax: 6 },
+  imp:    { id: "imp",    name: "Imp",    glyph: "i", color: "#da77f2", hp: 5,  damage: 2, speed: 120, sight: 9, behavior: "flee",   debut: 5, weight: 6,  threat: 1 },
+  warden: { id: "warden", name: "Warden", glyph: "W", color: "#f783ac", hp: 20, damage: 6, speed: 95,  sight: 9, behavior: "melee",  debut: 7, weight: 4,  threat: 5 },
 };
 
 // Difficulty curves — deliberately DIFFERENT slopes so a deep floor isn't a
@@ -289,7 +289,9 @@ const ACTION_COST = 100;     // energy one action costs; speed is energy gained 
 const PLAYER_HP = 30, PLAYER_SPEED = 100, PLAYER_ATTACK = 4;
 const INV_CAP = 8;           // inventory slot cap — scarcity is where the decisions live
 const REGEN_PER_TURN = 3;    // heal from a regen-tonic buff, per player turn
-const PASSIVE_REGEN_INTERVAL = 5; // player heals 1 HP every this-many turns (sustain vs. attrition)
+const PASSIVE_REGEN_INTERVAL = 8;    // player heals 1 HP every this-many turns (sustain vs. attrition)
+const PASSIVE_REGEN_CAP_FRAC = 0.5;  // ...but only up to this fraction of maxHp — passive regen recovers
+                                     // chip damage between fights; real wounds still need a potion.
 
 // Item definitions. Data-driven: one object literal per item. Effects are kept
 // orthogonal (heal / weapon / upgrade / blink / area / regen) so combinations
@@ -297,8 +299,8 @@ const PASSIVE_REGEN_INTERVAL = 5; // player heals 1 HP every this-many turns (su
 const ITEM_DEFS = {
   healing_potion: { name: "Healing Potion", glyph: "!", color: "#5ad469", tier: 1, weight: 30, depthMin: 1, depthMax: 10, kind: "consumable", effect: { type: "heal", amount: 12 } },
   strong_potion:  { name: "Strong Potion",  glyph: "!", color: "#8ef0a0", tier: 2, weight: 10, depthMin: 3, depthMax: 10, kind: "consumable", effect: { type: "heal", amount: 24 } },
-  sword:          { name: "Sword",          glyph: "/", color: "#cfd6e4", tier: 1, weight: 12, depthMin: 1, depthMax: 6,  kind: "weapon",     effect: { type: "weapon", bonus: 3 } },
-  greataxe:       { name: "Greataxe",       glyph: "/", color: "#ffd36b", tier: 3, weight: 8,  depthMin: 4, depthMax: 10, kind: "weapon",     effect: { type: "weapon", bonus: 6 } },
+  sword:          { name: "Worn Weapon",    glyph: "/", color: "#cfd6e4", tier: 1, weight: 12, depthMin: 1, depthMax: 6,  kind: "weapon",     effect: { type: "weapon", tierMin: 0 } },
+  greataxe:       { name: "Fine Weapon",     glyph: "/", color: "#ffd36b", tier: 3, weight: 8,  depthMin: 4, depthMax: 10, kind: "weapon",     effect: { type: "weapon", tierMin: 3 } },
   strength_shard: { name: "Strength Shard", glyph: "*", color: "#ff9f43", tier: 2, weight: 8,  depthMin: 1, depthMax: 10, kind: "upgrade",    effect: { type: "strength", amount: 1 } },
   blink_scroll:   { name: "Blink Scroll",   glyph: "?", color: "#8be9fd", tier: 2, weight: 12, depthMin: 2, depthMax: 10, kind: "consumable", effect: { type: "blink", range: 6 } },
   firebomb:       { name: "Firebomb",       glyph: "o", color: "#ff6b6b", tier: 2, weight: 12, depthMin: 2, depthMax: 10, kind: "consumable", effect: { type: "area", radius: 2, damage: 8 } },
@@ -306,6 +308,18 @@ const ITEM_DEFS = {
 };
 function isHealItem(defId) { return ITEM_DEFS[defId].effect.type === "heal"; }
 function isWeaponOrUpgrade(defId) { const k = ITEM_DEFS[defId].kind; return k === "weapon" || k === "upgrade"; }
+
+// Weapon progression ladder. A weapon drop doesn't clutter the pack — it evolves
+// the single weapon you carry one rung up this ladder (a "Fine Weapon" jumps you
+// straight to at least its tierMin). So every weapon you find is real progress
+// rather than a redundant Sword you'd never use.
+const WEAPON_LADDER = [
+  { name: "Rusty Axe",         bonus: 2 },
+  { name: "Wood Axe",          bonus: 3 },
+  { name: "Battle Axe",        bonus: 4 },
+  { name: "Great Axe",         bonus: 6 },
+  { name: "Pristine Greataxe", bonus: 9 },
+];
 
 /* =========================================================================
  * SIMULATION  —  pure data + logic, zero DOM/canvas
@@ -602,7 +616,7 @@ function createGame(seedString, depth = 1) {
     player: {
       x: floor.spawn.x, y: floor.spawn.y, prevX: floor.spawn.x, prevY: floor.spawn.y,
       hp: PLAYER_HP, maxHp: PLAYER_HP, speed: PLAYER_SPEED, energy: 0, alive: true,
-      weaponBonus: 0, weaponName: "fists", attackBonus: 0, regen: 0,
+      weaponBonus: 0, weaponName: "fists", weaponTier: -1, attackBonus: 0, regen: 0,
     },
     inventory: [],   // [{ defId, count }]
     turn: 0, ticks: 0, kills: 0, itemsFound: 0, gameOver: false, overReason: null,
@@ -631,7 +645,7 @@ function descend(g) {
   // and grants a partial heal — the reward for pressing deeper.
   p.maxHp = o.maxHp + 3;
   p.hp = Math.min(p.maxHp, o.hp + 6);
-  p.weaponBonus = o.weaponBonus; p.weaponName = o.weaponName;
+  p.weaponBonus = o.weaponBonus; p.weaponName = o.weaponName; p.weaponTier = o.weaponTier;
   p.attackBonus = o.attackBonus; p.regen = o.regen; p.energy = 0; p.alive = true;
   next.inventory = g.inventory.map((s) => ({ ...s }));
   next.turn = g.turn; next.kills = g.kills; next.itemsFound = g.itemsFound;
@@ -982,6 +996,18 @@ function attack(g, attacker, defender, verb = "hits") {
 
 /* --- Item effects (orthogonal) ------------------------------------------- */
 
+// Evolve the player's weapon one rung up WEAPON_LADDER (never past the top),
+// jumping straight to tierMin if a finer weapon demands it. Returns the new rung.
+function upgradeWeapon(g, tierMin = 0) {
+  const p = g.player;
+  const cur = p.weaponTier === undefined ? -1 : p.weaponTier;
+  const next = Math.min(WEAPON_LADDER.length - 1, Math.max(cur + 1, tierMin));
+  p.weaponTier = next;
+  const w = WEAPON_LADDER[next];
+  p.weaponBonus = w.bonus; p.weaponName = w.name;
+  return w;
+}
+
 function applyItem(g, defId) {
   const ef = ITEM_DEFS[defId].effect;
   const p = g.player;
@@ -990,9 +1016,10 @@ function applyItem(g, defId) {
       const before = p.hp; p.hp = Math.min(p.maxHp, p.hp + ef.amount);
       pushMsg(g, `You heal ${p.hp - before} HP.`); break;
     }
-    case "weapon":
-      p.weaponBonus = ef.bonus; p.weaponName = ITEM_DEFS[defId].name;
-      pushMsg(g, `You wield the ${p.weaponName}.`); break;
+    case "weapon": {
+      const w = upgradeWeapon(g, ef.tierMin);
+      pushMsg(g, `Your weapon becomes a ${w.name} (+${w.bonus}).`); break;
+    }
     case "strength":
       p.attackBonus += ef.amount; pushMsg(g, `Your attacks feel stronger (+${ef.amount}).`); break;
     case "regen":
@@ -1071,9 +1098,14 @@ function endPlayerAction(g) {
   g.player.energy -= ACTION_COST;
   if (g.player.alive) {
     if (g.player.regen > 0) { g.player.regen--; g.player.hp = Math.min(g.player.maxHp, g.player.hp + REGEN_PER_TURN); }
-    // Slow passive regen so exploration recovers chip damage between fights.
+    // Slow passive regen so exploration recovers chip damage between fights,
+    // but it tops out at half HP — it can't heal a real wound, so potions matter.
     g.player.regenClock = (g.player.regenClock || 0) + 1;
-    if (g.player.regenClock >= PASSIVE_REGEN_INTERVAL) { g.player.regenClock = 0; g.player.hp = Math.min(g.player.maxHp, g.player.hp + 1); }
+    if (g.player.regenClock >= PASSIVE_REGEN_INTERVAL) {
+      g.player.regenClock = 0;
+      const cap = Math.floor(g.player.maxHp * PASSIVE_REGEN_CAP_FRAC);
+      if (g.player.hp < cap) g.player.hp = Math.min(cap, g.player.hp + 1);
+    }
   }
   updateFOV(g);
   g.turn++;
@@ -1095,6 +1127,17 @@ function playerPickup(g) {
   if (g.gameOver) return false;
   const it = itemAt(g, g.player.x, g.player.y);
   if (!it) { pushMsg(g, "Nothing here to pick up."); return false; }
+  const def = ITEM_DEFS[it.defId];
+  // Weapons don't take a pack slot — a weapon drop evolves the one weapon you
+  // carry up WEAPON_LADDER, so every one you find is progress, not clutter.
+  if (def.kind === "weapon") {
+    const w = upgradeWeapon(g, def.effect.tierMin);
+    g.items = g.items.filter((o) => o !== it);
+    g.itemsFound++;
+    pushMsg(g, `Your weapon becomes a ${w.name} (+${w.bonus}).`);
+    endPlayerAction(g);
+    return true;
+  }
   if (!addToInventory(g, it.defId)) { pushMsg(g, "Your pack is full."); return false; }
   g.items = g.items.filter((o) => o !== it);
   g.itemsFound++;
@@ -1383,7 +1426,7 @@ function competentBot(seed) {
     if (near.length >= 3 && slotOfEffect("area") >= 0) { usePlayerItem(g, slotOfEffect("area")); continue; }
     if (p.hp <= Math.floor(p.maxHp * 0.35) && adj.length >= 2 && slotOfEffect("blink") >= 0) { usePlayerItem(g, slotOfEffect("blink")); continue; }
     if (adj.length) { adj.sort((a, b) => a.hp - b.hp); const t = adj[0]; playerMove(g, Math.sign(t.x - p.x), Math.sign(t.y - p.y)); continue; }
-    if (itemAt(g, p.x, p.y)) { playerPickup(g); continue; }
+    if (itemAt(g, p.x, p.y) && playerPickup(g)) continue; // if the pickup is refused, step off the tile instead of looping
     // Run down nearby archers (they punish a fleeing back); otherwise head for
     // the stairs and only fight what's adjacent — a competent player dives past a
     // slow melee boss rather than trading blows with it.
@@ -1610,7 +1653,7 @@ function runTests() {
           if (slot >= 0) { usePlayerItem(g, slot); continue; }
         }
         // Grab anything underfoot.
-        if (itemAt(g, g.player.x, g.player.y)) { playerPickup(g); continue; }
+        if (itemAt(g, g.player.x, g.player.y) && playerPickup(g)) continue; // refused pickup: don't loop on the tile
         // Step toward the stairs down the stairs-flow field; attack blockers.
         const sf = distField8(g.tiles, [idx(g.floor.stairs.x, g.floor.stairs.y)]);
         const here = sf[idx(g.player.x, g.player.y)];

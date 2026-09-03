@@ -15,6 +15,8 @@ server, no dependencies, no assets — one self-contained file. Everything is dr
 - **Move:** arrow keys, WASD, or vi-keys (`hjkl` + diagonals `yubn`)
 - **Wait:** space or `.`
 - **Pick up:** `g` &nbsp;·&nbsp; **Use item:** number keys `1`–`8` (or tap an inventory slot)
+- **Weapons evolve:** each weapon you pick up upgrades the one you carry, up a ladder from a
+  Rusty Axe to a Pristine Greataxe — no slot used, no duplicates to manage
 - **Descend:** `>` while standing on the stairs (`>`)
 - **Touch:** an on-screen D-pad and action buttons appear on tablets/phones
 - **Share a run:** the seed shows on screen and the death screen; append `?seed=YOURSEED` to

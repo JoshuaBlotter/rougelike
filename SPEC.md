@@ -60,6 +60,15 @@ single static file directly).
 - **Added a player growth axis** (passive regen + maxHP growth on descent). The spec scales
   enemies but gives the player only weapon-driven attack growth; without an HP curve, late
   floors mathematically outrun the player. The balance harness made this obvious.
+- **Post-playtest balance/UX pass (2026-09-03):** passive regen was topping the bar off for
+  free, so potions never mattered — it now recovers chip damage only up to **50% of maxHp**
+  (real wounds need a potion). Weapons were redundant clutter (a second Sword did nothing), so
+  they became a **progression ladder** (`WEAPON_LADDER`): a weapon drop no longer takes a pack
+  slot — it evolves the single weapon you carry one rung (Rusty Axe → … → Pristine Greataxe),
+  and a rarer "Fine Weapon" jumps you to at least its `tierMin`. Both are simulation changes but
+  touch no generation, so `hashRun` and the pinned determinism hash are unaffected. Also fixed a
+  bug: `ENEMY_TYPES` had no `name`, so every combat line read "The undefined hits you" — added
+  display names.
 - **Pack behavior (§5, "optional") skipped** — the threat budget keeps groups small and the
   boss-escort model covers regrouping; it didn't earn its complexity yet.
 - **Locked doors / keys not implemented** — the softlock-avoidance section is written
