@@ -16,11 +16,14 @@
   corner rule, seeded PRNG with split streams, debug scaffolding, determinism tests.
 -->
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<!-- Add to Home Screen -> launches fullscreen with no browser chrome (iOS/Android). -->
+<!-- No viewport-fit=cover: in fullscreen (Add to Home Screen) iOS then keeps the
+     content INSIDE the safe area automatically, below the Dynamic Island / status
+     bar, instead of bleeding under it (which needed fragile env() insets). -->
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<!-- Opaque black status bar matches the dark theme and reserves its own space. -->
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
 <meta name="apple-mobile-web-app-title" content="Roguelike">
 <title>Seeded Roguelike</title>
 <style>
@@ -90,8 +93,8 @@
   @media (pointer: coarse), (max-width: 780px) {
     #touch { display: flex; }
     #wrap { flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: 8px;
-      /* include safe-area-inset-top so content clears the status bar / Dynamic Island
-         in fullscreen (Add to Home Screen) mode, where the page bleeds under it. */
+      /* env() insets are a belt-and-suspenders floor of 8px; without viewport-fit=
+         cover iOS already keeps content inside the safe area in fullscreen mode. */
       padding: max(8px, env(safe-area-inset-top)) max(8px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left)); }
     /* #side dissolves so its panels become direct flex items we can reorder */
     #side { display: contents; }
