@@ -90,7 +90,9 @@
   @media (pointer: coarse), (max-width: 780px) {
     #touch { display: flex; }
     #wrap { flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: 8px;
-      padding: 8px max(8px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left)); }
+      /* include safe-area-inset-top so content clears the status bar / Dynamic Island
+         in fullscreen (Add to Home Screen) mode, where the page bleeds under it. */
+      padding: max(8px, env(safe-area-inset-top)) max(8px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left)); }
     /* #side dissolves so its panels become direct flex items we can reorder */
     #side { display: contents; }
     #side h1 { display: none; }              /* reclaim vertical space on small screens */
