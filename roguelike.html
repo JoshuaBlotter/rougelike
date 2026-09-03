@@ -1,0 +1,1883 @@
+<!--
+  Seeded Procedural Roguelike — single self-contained file, no build, no CDN, no assets.
+  Double-click to run.
+
+  DETERMINISM CONTRACT: this file MUST NOT use the built-in JS RNG (the platform's
+  random function) anywhere. All randomness comes from seeded mulberry32 streams (see
+  RNG section). Test 5 greps the source for that call and fails if it appears — which
+  is why this note describes it in words rather than spelling the call out. Cosmetic
+  randomness lives on its own stream and never feeds back into the simulation.
+
+  ARCHITECTURE: simulation is a plain data object. The renderer reads it and draws; it
+  never mutates state, and the simulation never touches the canvas or DOM. Everything
+  above the "RENDER + INPUT" guard runs headless in Node with no canvas present.
+
+  Milestone 1 (Skeleton): canvas, grid render, player movement with 8-dir collision +
+  corner rule, seeded PRNG with split streams, debug scaffolding, determinism tests.
+-->
+<meta charset="utf-8">
+<title>Seeded Roguelike</title>
+<style>
+  html, body { margin: 0; background: #0b0d11; color: #c8d0dc; font: 14px/1.4 ui-monospace, Menlo, Consolas, monospace; }
+  #wrap { display: flex; gap: 16px; padding: 16px; align-items: flex-start; flex-wrap: wrap; }
+  canvas { background: #05060a; image-rendering: pixelated; border: 1px solid #1c2230; }
+  #side { width: 320px; }
+  h1 { font-size: 15px; margin: 0 0 8px; color: #e6ebf2; letter-spacing: .5px; }
+  .panel { background: #10141c; border: 1px solid #1c2230; border-radius: 6px; padding: 10px 12px; margin-bottom: 12px; }
+  .row { display: flex; gap: 6px; margin: 6px 0; }
+  input, button { font: inherit; background: #161c28; color: #c8d0dc; border: 1px solid #2a3346; border-radius: 4px; padding: 5px 8px; }
+  button { cursor: pointer; }
+  button:hover { background: #1e2636; }
+  input { flex: 1; min-width: 0; }
+  .muted { color: #6b7688; }
+  .hpbar { height: 14px; background: #2a1418; border: 1px solid #3a2028; border-radius: 3px; overflow: hidden; margin: 4px 0; position: relative; }
+  .hpfill { height: 100%; background: linear-gradient(#ff6b6b, #c0392b); transition: width .12s; }
+  .hptext { position: absolute; inset: 0; text-align: center; font-size: 11px; color: #fff; line-height: 14px; }
+  .slot { display: flex; justify-content: space-between; padding: 2px 4px; border-radius: 3px; }
+  .slot:hover { background: #1a2130; }
+  .slot .n { color: #6b7688; width: 16px; }
+  .dead { color: #ff6b6b; font-weight: bold; }
+  code { color: #9fd3ff; }
+  #msglog { min-height: 72px; }
+  #msglog div { color: #9aa6b8; }
+  #msglog div:last-child { color: #d6deea; }
+  label { display: flex; align-items: center; gap: 6px; margin: 3px 0; color: #9aa6b8; }
+</style>
+
+<div id="wrap">
+  <canvas id="game" width="704" height="704"></canvas>
+  <div id="side">
+    <h1>SEEDED ROGUELIKE</h1>
+    <div class="panel">
+      <div class="muted">seed</div>
+      <div class="row"><input id="seedInput" spellcheck="false"><button id="seedGo">New run</button></div>
+      <div class="muted">Current: <code id="seedShow">—</code> · depth <span id="depthShow">1</span></div>
+    </div>
+    <div class="panel" id="hud"></div>
+    <div class="panel" id="inv"></div>
+    <div class="panel" id="msglog"></div>
+    <div class="panel">
+      <div class="muted" style="margin-bottom:6px">Debug (?debug=1)</div>
+      <div id="debugPanel" class="muted">disabled</div>
+    </div>
+    <div class="panel muted" style="font-size:12px">
+      Move: arrows / WASD / hjkl+yubn · wait: space or .<br>
+      Diagonals blocked through wall-corner gaps.
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+(function () {
+/* =========================================================================
+ * RNG  —  the determinism backbone
+ * =======================================================================*/
+
+// FNV-1a 32-bit string hash. Stable across machines and JS engines: pure
+// integer math on char codes, no locale or float dependence.
+function fnv1a(str) {
+  let h = 0x811c9dc5 >>> 0;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    // h *= 16777619, kept in 32 bits via the shift-add decomposition.
+    h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+  }
+  return h >>> 0;
+}
+
+// mulberry32: one small, fast, well-distributed PRNG. The ONLY source of
+// randomness in this file. Returns floats in [0,1).
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a = (a + 0x6D2B79F5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// A stream wraps a raw generator with the derived helpers the game needs.
+// Every helper is deterministic given the seed; nothing here reads the clock.
+function makeStream(seed) {
+  const next = mulberry32(seed);
+  const s = {
+    next,
+    float: (a = 1, b) => (b === undefined ? next() * a : a + next() * (b - a)),
+    // int in [0, n)
+    int: (n) => Math.floor(next() * n),
+    // integer in [a, b] inclusive
+    range: (a, b) => a + Math.floor(next() * (b - a + 1)),
+    chance: (p) => next() < p,
+    pick: (arr) => arr[Math.floor(next() * arr.length)],
+    // Weighted pick: items must expose a numeric `weight`.
+    weighted: (arr, weightOf = (x) => x.weight) => {
+      let total = 0;
+      for (const it of arr) total += weightOf(it);
+      let r = next() * total;
+      for (const it of arr) { r -= weightOf(it); if (r < 0) return it; }
+      return arr[arr.length - 1];
+    },
+    // Seeded Fisher-Yates. The ONLY permitted shuffle.
+    shuffle: (arr) => {
+      for (let i = arr.length - 1; i > 0; i--) {
+        const j = Math.floor(next() * (i + 1));
+        const t = arr[i]; arr[i] = arr[j]; arr[j] = t;
+      }
+      return arr;
+    },
+  };
+  return s;
+}
+
+// Fixed per-purpose salts. Splitting streams means a player attacking one
+// extra time on floor 2 (combat stream) cannot shift floor 3's layout (map
+// stream). Each stream is master-seed + salt + depth, mixed so nearby seeds
+// and depths don't produce correlated streams.
+const STREAM_SALTS = {
+  map:      0x9e3779b1,
+  items:    0x85ebca77,
+  spawns:   0xc2b2ae3d,
+  combat:   0x27d4eb2f,
+  cosmetic: 0x165667b1,
+  ai:       0x94d049bb, // enemy runtime decisions (wander) — kept off the map/spawn streams
+};
+
+function mixSeed(master, salt, depth) {
+  // Integer avalanche mix (splitmix-style finalizer) so master^salt^depth
+  // scatters well instead of leaving low-bit structure in the seed.
+  let h = (master ^ salt ^ Math.imul(depth + 1, 0x9e3779b1)) >>> 0;
+  h = Math.imul(h ^ (h >>> 16), 0x21f0aaad) >>> 0;
+  h = Math.imul(h ^ (h >>> 15), 0x735a2d97) >>> 0;
+  return (h ^ (h >>> 15)) >>> 0;
+}
+
+function makeStreams(seedString, depth) {
+  const master = fnv1a(String(seedString));
+  const streams = {};
+  for (const key in STREAM_SALTS) {
+    streams[key] = makeStream(mixSeed(master, STREAM_SALTS[key], depth));
+  }
+  streams.master = master;
+  return streams;
+}
+
+/* =========================================================================
+ * CONTENT TABLES  —  data-driven, top of file
+ * =======================================================================*/
+
+const TILE = { WALL: 0, FLOOR: 1, STAIRS: 2 };
+// A tile is walkable if it isn't a wall. STAIRS sit on floor and are walkable.
+function tileWalkable(t) { return t !== TILE.WALL; }
+
+// 8-directional movement. Diagonals last so orthogonal ties resolve to
+// cardinal moves first where it matters.
+const DIRS8 = [
+  { dx:  0, dy: -1 }, { dx:  0, dy:  1 }, { dx: -1, dy:  0 }, { dx:  1, dy:  0 },
+  { dx: -1, dy: -1 }, { dx:  1, dy: -1 }, { dx: -1, dy:  1 }, { dx:  1, dy:  1 },
+];
+// Orthogonal-only neighbours. Connectivity is judged on 4-connectivity so a
+// mere diagonal touch between two rooms never counts as "connected" — a real
+// path has to go through a carved corridor.
+const DIRS4 = [[0,-1],[0,1],[-1,0],[1,0]];
+
+// Map dimensions. 44x44 at 16px cells fills the 704px canvas exactly.
+const MAP_W = 44, MAP_H = 44;
+
+// Generation tuning, kept together and data-driven.
+const GEN = {
+  minRooms: 8, maxRooms: 14,
+  roomWMin: 5, roomWMax: 11,
+  roomHMin: 4, roomHMax: 9,
+  placeAttempts: 220,     // rejection-sampling budget for room placement
+  loopFraction: 0.15,     // extra non-tree edges added back, as a fraction of room count
+  widenChance: 0.18,      // fraction of corridors widened to 2 tiles
+  maxRegens: 5,           // beyond this, the generator is considered broken
+};
+// Stairs must be at least this many tiles of PATH distance from spawn, scaled
+// by depth, so deeper floors force a longer traverse.
+function requiredStairDist(depth) { return 8 + Math.floor(depth * 1.5); }
+
+// Enemy archetypes. Data-driven: adding a monster is adding one entry here.
+// `behavior` selects the AI: melee (close and hit), ranged (kite at distance),
+// flee (run; only fights when cornered). `debut` is the depth the archetype is
+// introduced ALONE; `weight` drives the mix on later floors. hp/damage here are
+// depth-1 bases; enemyHpScale/enemyDmgScale grow them on separate curves.
+const ENEMY_TYPES = {
+  grunt:  { id: "grunt",  glyph: "g", color: "#ff6b6b", hp: 6,  damage: 2, speed: 100, sight: 8, behavior: "melee",  debut: 1, weight: 10, threat: 1 },
+  hound:  { id: "hound",  glyph: "h", color: "#ffa94d", hp: 4,  damage: 2, speed: 165, sight: 9, behavior: "melee",  debut: 2, weight: 9,  threat: 1.5 },
+  brute:  { id: "brute",  glyph: "B", color: "#c92a2a", hp: 15, damage: 4, speed: 65,  sight: 7, behavior: "melee",  debut: 3, weight: 6,  threat: 3 },
+  archer: { id: "archer", glyph: "a", color: "#63e6be", hp: 6,  damage: 3, speed: 100, sight: 9, behavior: "ranged", debut: 4, weight: 6,  threat: 2.5, rangeMin: 3, rangeMax: 6 },
+  imp:    { id: "imp",    glyph: "i", color: "#da77f2", hp: 5,  damage: 2, speed: 120, sight: 9, behavior: "flee",   debut: 5, weight: 6,  threat: 1 },
+  warden: { id: "warden", glyph: "W", color: "#f783ac", hp: 20, damage: 6, speed: 95,  sight: 9, behavior: "melee",  debut: 7, weight: 4,  threat: 5 },
+};
+
+// Difficulty curves — deliberately DIFFERENT slopes so a deep floor isn't a
+// shallow floor with bigger numbers. HP climbs fastest, damage slower. Instead
+// of a raw enemy count, floors fill to a THREAT budget (each archetype costs
+// its `threat`), so dangerous types are naturally rare and a floor never becomes
+// a mosh pit of brutes. A hard count cap (by area) still applies.
+function enemyHpScale(depth)  { return 1 + 0.085 * (depth - 1); }
+function enemyDmgScale(depth) { return 1 + 0.05 * (depth - 1); }
+function threatBudget(depth)  { return 3 + 1.3 * (depth - 1); }
+function enemyCountCap(depth, area) { return Math.max(1, Math.min(2 + Math.floor(depth * 0.7), Math.floor(area / 70), 8)); }
+
+// AI tuning.
+const UNREACHABLE = -1;      // flow-field sentinel for cells the flood can't reach
+const SEARCH_TURNS = 6;      // turns a searcher pursues a last-known position before giving up
+const SOUND_RADIUS = 6;      // flow-distance a fresh alert propagates to nearby idlers
+const IDLE_WANDER_CHANCE = 0.35;
+const OSC_REVERSE_PENALTY = 1; // tie-break weight against immediately reversing the last move
+
+// Energy / combat tuning.
+const ACTION_COST = 100;     // energy one action costs; speed is energy gained per tick
+const PLAYER_HP = 30, PLAYER_SPEED = 100, PLAYER_ATTACK = 4;
+const INV_CAP = 8;           // inventory slot cap — scarcity is where the decisions live
+const REGEN_PER_TURN = 3;    // heal from a regen-tonic buff, per player turn
+const PASSIVE_REGEN_INTERVAL = 5; // player heals 1 HP every this-many turns (sustain vs. attrition)
+
+// Item definitions. Data-driven: one object literal per item. Effects are kept
+// orthogonal (heal / weapon / upgrade / blink / area / regen) so combinations
+// stay interesting. `kind` consumable stacks; weapon/upgrade take a slot each.
+const ITEM_DEFS = {
+  healing_potion: { name: "Healing Potion", glyph: "!", color: "#5ad469", tier: 1, weight: 30, depthMin: 1, depthMax: 10, kind: "consumable", effect: { type: "heal", amount: 12 } },
+  strong_potion:  { name: "Strong Potion",  glyph: "!", color: "#8ef0a0", tier: 2, weight: 10, depthMin: 3, depthMax: 10, kind: "consumable", effect: { type: "heal", amount: 24 } },
+  sword:          { name: "Sword",          glyph: "/", color: "#cfd6e4", tier: 1, weight: 12, depthMin: 1, depthMax: 6,  kind: "weapon",     effect: { type: "weapon", bonus: 3 } },
+  greataxe:       { name: "Greataxe",       glyph: "/", color: "#ffd36b", tier: 3, weight: 8,  depthMin: 4, depthMax: 10, kind: "weapon",     effect: { type: "weapon", bonus: 6 } },
+  strength_shard: { name: "Strength Shard", glyph: "*", color: "#ff9f43", tier: 2, weight: 8,  depthMin: 1, depthMax: 10, kind: "upgrade",    effect: { type: "strength", amount: 1 } },
+  blink_scroll:   { name: "Blink Scroll",   glyph: "?", color: "#8be9fd", tier: 2, weight: 12, depthMin: 2, depthMax: 10, kind: "consumable", effect: { type: "blink", range: 6 } },
+  firebomb:       { name: "Firebomb",       glyph: "o", color: "#ff6b6b", tier: 2, weight: 12, depthMin: 2, depthMax: 10, kind: "consumable", effect: { type: "area", radius: 2, damage: 8 } },
+  regen_tonic:    { name: "Regen Tonic",    glyph: "+", color: "#c58bff", tier: 2, weight: 10, depthMin: 3, depthMax: 10, kind: "consumable", effect: { type: "regen", turns: 6 } },
+};
+function isHealItem(defId) { return ITEM_DEFS[defId].effect.type === "heal"; }
+function isWeaponOrUpgrade(defId) { const k = ITEM_DEFS[defId].kind; return k === "weapon" || k === "upgrade"; }
+
+/* =========================================================================
+ * SIMULATION  —  pure data + logic, zero DOM/canvas
+ * =======================================================================*/
+
+function inBounds(x, y) { return x >= 0 && y >= 0 && x < MAP_W && y < MAP_H; }
+function idx(x, y) { return y * MAP_W + x; }
+
+// --- Generation helpers -----------------------------------------------------
+
+// Place non-overlapping rooms by rejection sampling. Every room keeps a 1-tile
+// margin from every other, so two rooms never share a wall — shared walls make
+// double-thick walls and confusing corridor stubs.
+function placeRooms(rng) {
+  const rooms = [];
+  const target = rng.range(GEN.minRooms, GEN.maxRooms);
+  for (let a = 0; a < GEN.placeAttempts && rooms.length < target; a++) {
+    const w = rng.range(GEN.roomWMin, GEN.roomWMax);
+    const h = rng.range(GEN.roomHMin, GEN.roomHMax);
+    const x = rng.range(1, MAP_W - w - 1);
+    const y = rng.range(1, MAP_H - h - 1);
+    const x2 = x + w - 1, y2 = y + h - 1;
+    let ok = true;
+    for (const r of rooms) {
+      // AABB overlap test inflated by the 1-tile margin.
+      if (x <= r.x2 + 1 && x2 >= r.x - 1 && y <= r.y2 + 1 && y2 >= r.y - 1) { ok = false; break; }
+    }
+    if (ok) rooms.push({ x, y, x2, y2, w, h, cx: x + (w >> 1), cy: y + (h >> 1) });
+  }
+  return rooms;
+}
+
+function roomDist(a, b) { return Math.abs(a.cx - b.cx) + Math.abs(a.cy - b.cy); }
+
+// Minimum spanning tree over room centers (Prim's). A spanning tree guarantees
+// every room is reachable; the loop edges added afterward are what stop the
+// dungeon from being a backtrack-only tree. Ties break on room index so the
+// tree is identical for a given seed.
+function buildMST(rooms) {
+  const n = rooms.length;
+  const inTree = new Array(n).fill(false);
+  const edges = [];
+  inTree[0] = true;
+  for (let added = 1; added < n; added++) {
+    let bestD = Infinity, bi = -1, bj = -1;
+    for (let i = 0; i < n; i++) {
+      if (!inTree[i]) continue;
+      for (let j = 0; j < n; j++) {
+        if (inTree[j]) continue;
+        const d = roomDist(rooms[i], rooms[j]);
+        if (d < bestD || (d === bestD && (j < bj || (j === bj && i < bi)))) { bestD = d; bi = i; bj = j; }
+      }
+    }
+    inTree[bj] = true;
+    edges.push([bi, bj]);
+  }
+  return edges;
+}
+
+// Choose ~loopFraction*roomCount extra edges — the shortest non-tree ones, so
+// loops connect nearby rooms rather than flinging long corridors across the map.
+function loopEdges(rooms, tree) {
+  const inTree = new Set(tree.map(([a, b]) => a < b ? a + "," + b : b + "," + a));
+  const cand = [];
+  for (let i = 0; i < rooms.length; i++)
+    for (let j = i + 1; j < rooms.length; j++)
+      if (!inTree.has(i + "," + j)) cand.push({ i, j, d: roomDist(rooms[i], rooms[j]) });
+  cand.sort((a, b) => a.d - b.d || a.i - b.i || a.j - b.j); // total order, no ties
+  const count = Math.round(rooms.length * GEN.loopFraction);
+  return cand.slice(0, count).map((e) => [e.i, e.j]);
+}
+
+// Carve an L-shaped corridor between two centers. `wide` widens it to 2 tiles.
+function carveCorridor(tiles, rng, ax, ay, bx, by, wide) {
+  const set = (x, y) => {
+    if (x > 0 && y > 0 && x < MAP_W - 1 && y < MAP_H - 1 && tiles[idx(x, y)] === TILE.WALL)
+      tiles[idx(x, y)] = TILE.FLOOR;
+  };
+  const hLeg = (y, x0, x1) => {
+    const lo = Math.min(x0, x1), hi = Math.max(x0, x1);
+    for (let x = lo; x <= hi; x++) { set(x, y); if (wide) set(x, y + 1); }
+  };
+  const vLeg = (x, y0, y1) => {
+    const lo = Math.min(y0, y1), hi = Math.max(y0, y1);
+    for (let y = lo; y <= hi; y++) { set(x, y); if (wide) set(x + 1, y); }
+  };
+  // Seeded choice of which leg goes first — bends the corridor left or up first.
+  if (rng.chance(0.5)) { hLeg(ay, ax, bx); vLeg(bx, ay, by); }
+  else { vLeg(ax, ay, by); hLeg(by, ax, bx); }
+}
+
+// BFS distance field over 4-connectivity. -1 means unreachable. Reused by
+// connectivity validation now and, in spirit, by the enemy flow field later.
+function bfsDistance(tiles, starts) {
+  const dist = new Int32Array(MAP_W * MAP_H).fill(-1);
+  const q = new Int32Array(MAP_W * MAP_H);
+  let head = 0, tail = 0;
+  for (const s of starts) { dist[s] = 0; q[tail++] = s; }
+  while (head < tail) {
+    const c = q[head++];
+    const cx = c % MAP_W, cy = (c / MAP_W) | 0, d = dist[c];
+    for (const [dx, dy] of DIRS4) {
+      const nx = cx + dx, ny = cy + dy;
+      if (nx < 0 || ny < 0 || nx >= MAP_W || ny >= MAP_H) continue;
+      const ni = idx(nx, ny);
+      if (dist[ni] === -1 && tileWalkable(tiles[ni])) { dist[ni] = d + 1; q[tail++] = ni; }
+    }
+  }
+  return dist;
+}
+
+function makeEnemy(id, x, y, typeId, depth = 1) {
+  const t = ENEMY_TYPES[typeId];
+  const hp = Math.max(1, Math.round(t.hp * enemyHpScale(depth)));
+  const damage = Math.max(1, Math.round(t.damage * enemyDmgScale(depth)));
+  return {
+    id, x, y, prevX: x, prevY: y, typeId, hp, maxHp: hp, damage, alive: true,
+    state: "idle", lastKnown: null, searchTurns: 0,
+    lastMove: { dx: 0, dy: 0 }, energy: 0, speed: t.speed,
+  };
+}
+function cloneEnemy(e) {
+  return { ...e, lastKnown: e.lastKnown ? { ...e.lastKnown } : null, lastMove: { ...e.lastMove } };
+}
+
+// Place enemies deterministically from rng.spawns. Enforces the anti-frustration
+// opening rules: none in the spawn room, none within 6 path-tiles of spawn, and
+// none in line of sight of the spawn tile. Because this runs during generation,
+// placements are part of the floor and fold into hashRun.
+function placeEnemies(rng, tiles, rooms, spawnRoom, spawn, distFromSpawn, depth) {
+  const spawnFOV = computeFOV(tiles, spawn.x, spawn.y, FOV_RADIUS);
+  const cands = [];
+  for (let ri = 0; ri < rooms.length; ri++) {
+    if (ri === spawnRoom) continue;                 // spawn room stays empty
+    const r = rooms[ri];
+    for (let y = r.y; y <= r.y2; y++) {
+      for (let x = r.x; x <= r.x2; x++) {
+        const i = idx(x, y);
+        if (tiles[i] !== TILE.FLOOR) continue;       // walls and the stairs tile excluded
+        if (distFromSpawn[i] < 6) continue;          // too close to the player's start
+        if (spawnFOV[i]) continue;                   // visible from spawn
+        cands.push(i);
+      }
+    }
+  }
+  cands.sort((a, b) => a - b);                       // stable order before the seeded shuffle
+  rng.shuffle(cands);
+
+  // Choose the roster by spending a THREAT budget. On the depth an archetype
+  // debuts, you meet it among plain grunts (the newcomer reads clearly without a
+  // swarm of itself); other floors draw from the full unlocked roster.
+  let area = 0;
+  for (let i = 0; i < tiles.length; i++) if (tileWalkable(tiles[i])) area++;
+  let cap = Math.min(enemyCountCap(depth, area), cands.length);
+  const debuting = Object.keys(ENEMY_TYPES).filter((t) => ENEMY_TYPES[t].debut === depth);
+  // A high-threat newcomer (a boss like the warden) debuts with a small escort so
+  // it reads as the centerpiece, not one face in a mob.
+  if (debuting.some((t) => ENEMY_TYPES[t].threat >= 4)) cap = Math.min(cap, 4);
+  const unlocked = Object.keys(ENEMY_TYPES).filter((t) => ENEMY_TYPES[t].debut <= depth);
+  // On a debut floor: exactly one newcomer (a clean mini-boss intro), the rest
+  // plain grunts. Otherwise: the full unlocked roster, weighted.
+  const fillPool = debuting.length ? ["grunt"] : unlocked;
+  const threat = (id) => ENEMY_TYPES[id].threat;
+
+  const types = [];
+  let budget = threatBudget(depth);
+  if (debuting.length) { const dt = rng.pick(debuting); types.push(dt); budget -= threat(dt); } // the single newcomer
+  for (let guard = 0; guard < 300 && types.length < cap && budget > 0; guard++) {
+    const affordable = fillPool.filter((id) => threat(id) <= budget + 0.5); // slack so cheap types stay usable
+    if (!affordable.length) break;
+    const pick = rng.weighted(affordable.map((id) => ({ id, weight: ENEMY_TYPES[id].weight }))).id;
+    types.push(pick); budget -= threat(pick);
+  }
+
+  const enemies = [];
+  for (let k = 0; k < types.length && k < cands.length; k++) {
+    const i = cands[k];
+    enemies.push(makeEnemy(k, i % MAP_W, (i / MAP_W) | 0, types[k], depth));
+  }
+  return enemies;
+}
+
+// Place items from a per-depth weighted table, then GUARANTEE a survivable
+// floor: at least one healing item every floor, and at least one weapon/upgrade
+// every two floors (odd depths). Pure weighted rolling eventually hands out a
+// weaponless, healless run — that isn't hard, it's broken.
+function placeItems(rng, tiles, spawn, stairs, enemies, depth) {
+  const occupied = new Set(enemies.map((e) => idx(e.x, e.y)));
+  occupied.add(idx(spawn.x, spawn.y));
+  occupied.add(idx(stairs.x, stairs.y));
+  const cands = [];
+  for (let i = 0; i < tiles.length; i++)
+    if (tiles[i] === TILE.FLOOR && !occupied.has(i)) cands.push(i); // FLOOR excludes walls and the stairs tile
+  cands.sort((a, b) => a - b);
+  rng.shuffle(cands);
+
+  const pool = Object.keys(ITEM_DEFS).filter((id) => depth >= ITEM_DEFS[id].depthMin && depth <= ITEM_DEFS[id].depthMax);
+  const count = Math.min(cands.length, 2 + Math.floor(depth / 2) + rng.range(0, 2));
+  const items = [];
+  let nextTile = 0, iid = 0;
+  const put = (defId) => {
+    if (nextTile >= cands.length) return;
+    const i = cands[nextTile++];
+    items.push({ iid: iid++, x: i % MAP_W, y: (i / MAP_W) | 0, defId });
+  };
+  for (let k = 0; k < count; k++) put(rng.weighted(pool.map((id) => ({ id, weight: ITEM_DEFS[id].weight }))).id);
+
+  // Guarantees, placed on fresh tiles so they don't erase rolled variety.
+  if (!items.some((it) => isHealItem(it.defId))) put("healing_potion");
+  // Deep floors are longer grinds — guarantee a second heal from depth 6 on.
+  if (depth >= 6 && items.filter((it) => isHealItem(it.defId)).length < 2) put("healing_potion");
+  if (depth % 2 === 1 && !items.some((it) => isWeaponOrUpgrade(it.defId)))
+    put(depth >= 4 ? "greataxe" : "sword");
+
+  return items;
+}
+function cloneItem(it) { return { ...it }; }
+
+// One generation attempt. Returns null if the layout fails validation, so the
+// caller can retry with a fresh sub-seed rather than shipping a broken floor.
+function generateAttempt(seedString, depth, rng) {
+  const tiles = new Uint8Array(MAP_W * MAP_H); // all WALL (0)
+  const rooms = placeRooms(rng.map);
+  if (rooms.length < 2) return null;
+
+  for (const r of rooms)
+    for (let y = r.y; y <= r.y2; y++)
+      for (let x = r.x; x <= r.x2; x++) tiles[idx(x, y)] = TILE.FLOOR;
+
+  const tree = buildMST(rooms);
+  const extra = loopEdges(rooms, tree);
+  for (const [i, j] of tree.concat(extra))
+    carveCorridor(tiles, rng.map, rooms[i].cx, rooms[i].cy, rooms[j].cx, rooms[j].cy, rng.map.chance(GEN.widenChance));
+
+  // Spawn in a seeded room; its center is guaranteed floor.
+  const spawnRoom = rng.map.range(0, rooms.length - 1);
+  const spawn = { x: rooms[spawnRoom].cx, y: rooms[spawnRoom].cy };
+
+  // Flood from spawn. Every floor tile must be reachable (4-connectivity).
+  const dist = bfsDistance(tiles, [idx(spawn.x, spawn.y)]);
+  let floorCount = 0, reachable = 0;
+  for (let i = 0; i < tiles.length; i++) {
+    if (tileWalkable(tiles[i])) { floorCount++; if (dist[i] >= 0) reachable++; }
+  }
+  if (reachable !== floorCount) return null; // isolated pocket — reject
+
+  // Stairs: the reachable room center farthest from spawn (path distance),
+  // and it must clear the depth-scaled minimum.
+  let stairs = null, bestD = -1;
+  for (let ri = 0; ri < rooms.length; ri++) {
+    if (ri === spawnRoom) continue;
+    const r = rooms[ri], d = dist[idx(r.cx, r.cy)];
+    if (d > bestD) { bestD = d; stairs = { x: r.cx, y: r.cy }; }
+  }
+  if (!stairs || bestD < requiredStairDist(depth)) return null;
+  tiles[idx(stairs.x, stairs.y)] = TILE.STAIRS;
+
+  const enemies = placeEnemies(rng.spawns, tiles, rooms, spawnRoom, spawn, dist, depth);
+  const items = placeItems(rng.items, tiles, spawn, stairs, enemies, depth);
+
+  return { tiles, w: MAP_W, h: MAP_H, rooms, spawn, spawnRoom, stairs, dist, depth, enemies, items };
+}
+
+// Public generator: retries with a derived sub-seed on failure, LOUDLY, so a
+// generator bug can't hide behind silent regeneration. Beyond maxRegens it
+// throws — that many failures means the generator itself is wrong.
+function generateFloor(seedString, depth) {
+  for (let attempt = 0; attempt <= GEN.maxRegens; attempt++) {
+    // attempt 0 uses the plain seed; retries derive a distinct sub-seed.
+    const seedVariant = attempt === 0 ? seedString : seedString + "#regen" + attempt;
+    const rng = makeStreams(seedVariant, depth);
+    const floor = generateAttempt(seedVariant, depth, rng);
+    if (floor) {
+      floor.rng = rng;              // downstream item/enemy placement shares this
+      floor.seedVariant = seedVariant;
+      floor.regens = attempt;
+      if (attempt > 0 && typeof console !== "undefined")
+        console.warn(`[gen] seed "${seedString}" depth ${depth} regenerated ${attempt}x (sub-seed ${seedVariant})`);
+      return floor;
+    }
+  }
+  throw new Error(`[gen] seed "${seedString}" depth ${depth} failed after ${GEN.maxRegens} regenerations — generator bug`);
+}
+
+function createGame(seedString, depth = 1) {
+  const floor = generateFloor(seedString, depth);
+  const g = {
+    seed: String(seedString),
+    depth,
+    floor,
+    tiles: floor.tiles,
+    w: floor.w,
+    h: floor.h,
+    player: {
+      x: floor.spawn.x, y: floor.spawn.y, prevX: floor.spawn.x, prevY: floor.spawn.y,
+      hp: PLAYER_HP, maxHp: PLAYER_HP, speed: PLAYER_SPEED, energy: 0, alive: true,
+      weaponBonus: 0, weaponName: "fists", attackBonus: 0, regen: 0,
+    },
+    inventory: [],   // [{ defId, count }]
+    turn: 0, ticks: 0, kills: 0, itemsFound: 0, gameOver: false, overReason: null,
+    messages: [],
+    visible: null,
+    seen: null,
+    // Enemies and items are cloned from the pristine floor placement so play-time
+    // mutation never disturbs the canonical layout that hashRun fingerprints.
+    enemies: floor.enemies.map(cloneEnemy),
+    items: floor.items.map(cloneItem),
+    flow: null,      // cached flow field
+    flowFrom: -1,    // player tile the cache was built from
+    _sfCache: new Map(), // search fields by target tile (valid for the whole floor)
+  };
+  updateFOV(g); // seed the initial visible/remembered sets
+  return g;
+}
+
+// Descend: build the next floor from the SAME string seed at depth+1 (fixed by
+// (seed, depth), unaffected by the route taken here) while CARRYING the player's
+// progression — hp, weapon, upgrades, inventory, and run counters.
+function descend(g) {
+  const next = createGame(g.seed, g.depth + 1);
+  const p = next.player, o = g.player;
+  // Descending grows the player (a second scaling axis to match enemy scaling)
+  // and grants a partial heal — the reward for pressing deeper.
+  p.maxHp = o.maxHp + 3;
+  p.hp = Math.min(p.maxHp, o.hp + 6);
+  p.weaponBonus = o.weaponBonus; p.weaponName = o.weaponName;
+  p.attackBonus = o.attackBonus; p.regen = o.regen; p.energy = 0; p.alive = true;
+  next.inventory = g.inventory.map((s) => ({ ...s }));
+  next.turn = g.turn; next.kills = g.kills; next.itemsFound = g.itemsFound;
+  next.messages = g.messages;
+  updateFOV(next);
+  return next;
+}
+
+function tileAt(g, x, y) { return inBounds(x, y) ? g.tiles[idx(x, y)] : TILE.WALL; }
+function isWalkable(g, x, y) { return inBounds(x, y) && tileWalkable(g.tiles[idx(x, y)]); }
+
+/* =========================================================================
+ * FIELD OF VIEW  —  symmetric shadowcasting (pure, DOM-free, no RNG)
+ *
+ * Albert Ford's algorithm: four cardinal quadrants, each scanned as expanding
+ * rows of (depth, column). A row carries a visible wedge [start,end] as slopes;
+ * a floor->wall edge recurses into a narrower wedge, a wall->floor edge widens
+ * the start. Slopes are exact integer fractions compared by cross-multiplication
+ * — no floating-point accumulation, and identical on every machine. Its defining
+ * property is symmetric, non-leaking corners: light cannot pass through the
+ * point where two walls touch diagonally. That is exactly the M3 gate.
+ * =======================================================================*/
+
+const FOV_RADIUS = 9;
+
+// Map a quadrant-local (depth, col) back to map (x,y). Cardinal: 0=N,1=E,2=S,3=W.
+function fovTransform(card, ox, oy, depth, col) {
+  if (card === 0) return [ox + col, oy - depth];
+  if (card === 1) return [ox + depth, oy + col];
+  if (card === 2) return [ox + col, oy + depth];
+  return [ox - depth, oy + col];
+}
+
+// Visibility grid (1 = visible) for an observer at (ox,oy). Pure over `tiles`.
+function computeFOV(tiles, ox, oy, radius = FOV_RADIUS) {
+  const vis = new Uint8Array(MAP_W * MAP_H);
+  if (!inBounds(ox, oy)) return vis;
+  vis[idx(ox, oy)] = 1; // observer always sees its own cell
+  const isWall = (x, y) => !inBounds(x, y) || tiles[idx(x, y)] === TILE.WALL;
+  const reveal = (x, y) => { if (inBounds(x, y)) vis[idx(x, y)] = 1; };
+  const r2 = radius * radius;
+
+  // A slope is the fraction n/d (d>0). slopeOf gives a tile's boundary slope.
+  const slopeOf = (depth, col) => ({ n: 2 * col - 1, d: 2 * depth });
+  // round_ties_up(depth * s), round_ties_down(depth * s), on the fraction s.
+  const roundUp = (depth, s) => Math.floor((2 * depth * s.n + s.d) / (2 * s.d));
+  const roundDown = (depth, s) => Math.ceil((2 * depth * s.n - s.d) / (2 * s.d));
+  const geStart = (col, depth, s) => col * s.d >= depth * s.n; // col >= depth*s
+  const leEnd = (col, depth, s) => col * s.d <= depth * s.n;   // col <= depth*s
+
+  function scanRow(card, depth, start, end) {
+    if (depth > radius || (start.n * end.d) > (end.n * start.d)) return; // start > end: empty wedge
+    const minCol = roundUp(depth, start), maxCol = roundDown(depth, end);
+    let prevWall = null; // null until first tile seen
+    for (let col = minCol; col <= maxCol; col++) {
+      const [x, y] = fovTransform(card, ox, oy, depth, col);
+      const wall = isWall(x, y);
+      // Reveal walls in range, and floors that fall inside the symmetric wedge.
+      if ((wall || (geStart(col, depth, start) && leEnd(col, depth, end))) && depth * depth + col * col <= r2)
+        reveal(x, y);
+      if (prevWall === true && !wall) start = slopeOf(depth, col);          // wall -> floor: widen start
+      if (prevWall === false && wall) scanRow(card, depth + 1, start, slopeOf(depth, col)); // floor -> wall: recurse
+      prevWall = wall;
+    }
+    if (prevWall === false) scanRow(card, depth + 1, start, end); // row ended on floor: continue outward
+  }
+
+  for (let card = 0; card < 4; card++)
+    scanRow(card, 1, { n: -1, d: 1 }, { n: 1, d: 1 });
+
+  // Restrictive corner rule. Shadowcasting reveals a floor cell reachable by an
+  // exact diagonal sightline grazing the point where two walls touch — a corner
+  // leak. Keep a lit floor cell only if some NEARER orthogonal neighbour is also
+  // open and lit, so the line of sight never squeezes through a wall corner.
+  // This mirrors the diagonal-movement rule: you can only see where light could
+  // travel without threading a corner gap. Walls and the observer are exempt.
+  const snap = vis.slice();
+  for (let y = 0; y < MAP_H; y++) {
+    for (let x = 0; x < MAP_W; x++) {
+      const i = idx(x, y);
+      if (!snap[i] || (x === ox && y === oy) || tiles[i] === TILE.WALL) continue;
+      const man = Math.abs(x - ox) + Math.abs(y - oy);
+      let supported = false;
+      for (const [dx, dy] of DIRS4) {
+        const nx = x + dx, ny = y + dy;
+        if (Math.abs(nx - ox) + Math.abs(ny - oy) < man &&
+            inBounds(nx, ny) && snap[idx(nx, ny)] && tiles[idx(nx, ny)] !== TILE.WALL) { supported = true; break; }
+      }
+      if (!supported) vis[i] = 0;
+    }
+  }
+  return vis;
+}
+
+// Recompute the player's visible set and fold it into remembered terrain.
+// `visible` is this turn's lit set; `seen` accumulates across the floor and is
+// what lets the map be drawn dimmed from memory rather than omnisciently.
+function updateFOV(g) {
+  g.visible = computeFOV(g.tiles, g.player.x, g.player.y, FOV_RADIUS);
+  if (!g.seen) g.seen = new Uint8Array(g.tiles.length);
+  for (let i = 0; i < g.visible.length; i++) if (g.visible[i]) g.seen[i] = 1;
+}
+
+/* =========================================================================
+ * ENEMY AI + PATHFINDING  —  flow field (Dijkstra map) + state machine
+ *
+ * Instead of per-enemy A*, one BFS flood from the player produces a distance
+ * field over walkable tiles; every enemy just steps to a lower-valued neighbour.
+ * One flood serves all enemies (O(map), not O(enemies * A*)) and any number can
+ * converge from any direction. All simulation, no DOM.
+ * =======================================================================*/
+
+// 8-connected BFS distance field, honouring the diagonal corner rule so the
+// field never routes an enemy through a gap it can't actually move through.
+// Uniform step cost (diagonals cost 1) — integers only, no float accumulation.
+function distField8(tiles, starts) {
+  const dist = new Int32Array(MAP_W * MAP_H).fill(UNREACHABLE);
+  const q = new Int32Array(MAP_W * MAP_H);
+  let head = 0, tail = 0;
+  for (const s of starts) { dist[s] = 0; q[tail++] = s; }
+  while (head < tail) {
+    const c = q[head++];
+    const cx = c % MAP_W, cy = (c / MAP_W) | 0, d = dist[c];
+    for (const { dx, dy } of DIRS8) {
+      const nx = cx + dx, ny = cy + dy;
+      if (nx < 0 || ny < 0 || nx >= MAP_W || ny >= MAP_H) continue;
+      const ni = idx(nx, ny);
+      if (dist[ni] !== UNREACHABLE || !tileWalkable(tiles[ni])) continue;
+      if (dx !== 0 && dy !== 0 &&
+          !tileWalkable(tiles[idx(cx + dx, cy)]) && !tileWalkable(tiles[idx(cx, cy + dy)])) continue;
+      dist[ni] = d + 1;
+      q[tail++] = ni;
+    }
+  }
+  return dist;
+}
+
+// The flow field is cached and only rebuilt when the player's tile changes —
+// terrain is static within a floor, so nothing else invalidates it.
+function updateFlow(g) {
+  const pi = idx(g.player.x, g.player.y);
+  if (g.flow && g.flowFrom === pi) return g.flow;
+  g.flow = distField8(g.tiles, [pi]);
+  g.flowFrom = pi;
+  return g.flow;
+}
+
+// Line of sight via Bresenham: any wall strictly between the endpoints blocks.
+// Enemies use this (not the player's FOV) so their aggro can't see through walls.
+function hasLOS(tiles, x0, y0, x1, y1) {
+  let dx = Math.abs(x1 - x0), dy = Math.abs(y1 - y0);
+  let sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
+  let err = dx - dy, x = x0, y = y0;
+  while (true) {
+    if (!(x === x0 && y === y0) && !(x === x1 && y === y1) && tiles[idx(x, y)] === TILE.WALL) return false;
+    if (x === x1 && y === y1) return true;
+    const e2 = 2 * err;
+    if (e2 > -dy) { err -= dy; x += sx; }
+    if (e2 < dx) { err += dx; y += sy; }
+  }
+}
+
+function enemySees(g, e) {
+  const t = ENEMY_TYPES[e.typeId];
+  const dx = g.player.x - e.x, dy = g.player.y - e.y;
+  if (dx * dx + dy * dy > t.sight * t.sight) return false;
+  return hasLOS(g.tiles, e.x, e.y, g.player.x, g.player.y);
+}
+
+// Candidate moves along a field, best-first. dir "down" descends toward the
+// source (chase); dir "up" ascends away (flee/kite). Excludes the player's tile,
+// respects the corner rule, penalises reversing the previous move (anti-
+// oscillation), and tie-breaks on tile index (a stable key) so equal-cost
+// choices are deterministic, never engine-order.
+function fieldCandidates(g, e, field, dir = "down") {
+  const cur = field[idx(e.x, e.y)];
+  if (cur === UNREACHABLE) return [];
+  const out = [];
+  for (const { dx, dy } of DIRS8) {
+    const nx = e.x + dx, ny = e.y + dy;
+    if (nx < 0 || ny < 0 || nx >= MAP_W || ny >= MAP_H) continue;
+    if (nx === g.player.x && ny === g.player.y) continue; // never step onto the player
+    const ni = idx(nx, ny);
+    if (!tileWalkable(g.tiles[ni])) continue;
+    const v = field[ni];
+    if (v === UNREACHABLE) continue;
+    if (dir === "down" ? v >= cur : v <= cur) continue;   // must make progress
+    if (dx !== 0 && dy !== 0 &&
+        !tileWalkable(g.tiles[idx(e.x + dx, e.y)]) && !tileWalkable(g.tiles[idx(e.x, e.y + dy)])) continue;
+    const reverse = (e.lastMove.dx || e.lastMove.dy) && dx === -e.lastMove.dx && dy === -e.lastMove.dy;
+    const base = dir === "down" ? v : -v;                 // lower rank is better in both cases
+    out.push({ ni, nx, ny, dx, dy, rank: base + (reverse ? OSC_REVERSE_PENALTY : 0), tie: ni });
+  }
+  out.sort((a, b) => a.rank - b.rank || a.tie - b.tie);
+  return out;
+}
+
+// Idle wander: occasionally drift to a random adjacent open tile. Uses the AI
+// stream so it's reproducible from the seed without touching map/spawn streams.
+function wanderCandidates(g, e) {
+  if (!g.floor.rng.ai.chance(IDLE_WANDER_CHANCE)) return [];
+  const opts = [];
+  for (const { dx, dy } of DIRS8) {
+    const nx = e.x + dx, ny = e.y + dy;
+    if (!inBounds(nx, ny) || !tileWalkable(g.tiles[idx(nx, ny)])) continue;
+    if (nx === g.player.x && ny === g.player.y) continue;
+    if (dx !== 0 && dy !== 0 &&
+        !tileWalkable(g.tiles[idx(e.x + dx, e.y)]) && !tileWalkable(g.tiles[idx(e.x, e.y + dy)])) continue;
+    opts.push({ ni: idx(nx, ny), nx, ny, dx, dy });
+  }
+  g.floor.rng.ai.shuffle(opts);
+  return opts.slice(0, 1);
+}
+
+// Distance field toward a searcher's last-known position, memoised per tile for
+// the current turn so several searchers converging on one spot share the flood.
+function searchField(g, target) {
+  const key = idx(target.x, target.y);
+  if (!g._sfCache) g._sfCache = new Map();
+  let f = g._sfCache.get(key);
+  if (!f) { f = distField8(g.tiles, [key]); g._sfCache.set(key, f); }
+  return f;
+}
+
+// Pure flow-field pursuit step (no state machine, no sight test). This is the
+// pathfinding primitive the chase test exercises directly.
+function huntStep(g, e) {
+  const cands = fieldCandidates(g, e, updateFlow(g));
+  if (cands.length) {
+    const c = cands[0];
+    e.prevX = e.x; e.prevY = e.y; e.x = c.nx; e.y = c.ny; e.lastMove = { dx: c.dx, dy: c.dy };
+    return true;
+  }
+  e.lastMove = { dx: 0, dy: 0 };
+  return false;
+}
+
+// State transitions + choice of movement candidates for one enemy this turn.
+// The searching behaviour is the point of the whole system: a searcher chases
+// where it THINKS the player went (lastKnown), not the player's true position,
+// and only re-locks with a fresh line of sight — so it can be, and looks, wrong.
+function enemyThink(g, e, flow) {
+  const sees = enemySees(g, e);
+  if (sees) {
+    e.lastKnown = { x: g.player.x, y: g.player.y };
+    if (e.state === "idle") { e.state = "alerted"; e.justAlerted = true; } // one-beat notice
+    else e.state = "hunting";
+  } else if (e.state === "hunting" || e.state === "alerted") {
+    e.state = "searching";
+    e.searchTurns = SEARCH_TURNS;
+  } else if (e.state === "searching") {
+    if (e.lastKnown && e.x === e.lastKnown.x && e.y === e.lastKnown.y) { e.state = "idle"; e.lastKnown = null; }
+    else if (--e.searchTurns <= 0) { e.state = "idle"; e.lastKnown = null; }
+  }
+}
+
+// A fresh alert propagates as "sound" to nearby idlers via flow distance, so it
+// travels around corners rather than through walls.
+function propagateAlert(g, flow) {
+  for (const o of g.enemies) {
+    if (!o.alive || o.state !== "idle") continue;
+    const d = flow[idx(o.x, o.y)];
+    if (d !== UNREACHABLE && d <= SOUND_RADIUS) {
+      o.state = "searching"; o.lastKnown = { x: g.player.x, y: g.player.y }; o.searchTurns = SEARCH_TURNS;
+    }
+  }
+}
+
+// Move an enemy to its first candidate not blocked by an ally (live occupancy is
+// what stops stacking and conga lines under the interleaved scheduler).
+function moveEnemy(g, e, cands) {
+  const occupied = new Set();
+  for (const o of g.enemies) if (o.alive && o !== e) occupied.add(idx(o.x, o.y));
+  for (const c of cands) {
+    if (occupied.has(c.ni)) continue;
+    e.prevX = e.x; e.prevY = e.y; e.x = c.nx; e.y = c.ny; e.lastMove = { dx: c.dx, dy: c.dy };
+    return true;
+  }
+  e.lastMove = { dx: 0, dy: 0 };
+  return false;
+}
+
+// One enemy's whole action, dispatched by archetype behaviour:
+//   melee  — close and hit.
+//   ranged — hold at [rangeMin,rangeMax] with LOS and shoot; back off if crowded,
+//            close in to regain range/LOS otherwise.
+//   flee   — run up the flow field (away); only bites when cornered.
+function enemyAct(g, e) {
+  if (!e.alive) return;
+  const t = ENEMY_TYPES[e.typeId];
+  const flow = updateFlow(g);
+  e.justAlerted = false;
+  enemyThink(g, e, flow);
+  if (e.justAlerted) propagateAlert(g, flow);
+
+  const aware = e.state === "hunting" || e.state === "alerted";
+  const cheby = Math.max(Math.abs(e.x - g.player.x), Math.abs(e.y - g.player.y));
+  const approach = () => moveEnemy(g, e,
+    aware ? fieldCandidates(g, e, flow, "down")
+          : (e.state === "searching" && e.lastKnown) ? fieldCandidates(g, e, searchField(g, e.lastKnown), "down")
+          : wanderCandidates(g, e));
+
+  if (t.behavior === "ranged" && aware) {
+    const los = hasLOS(g.tiles, e.x, e.y, g.player.x, g.player.y);
+    if (los && cheby >= t.rangeMin && cheby <= t.rangeMax) { attack(g, e, g.player, "shoots"); return; }
+    if (los && cheby < t.rangeMin) { if (moveEnemy(g, e, fieldCandidates(g, e, flow, "up"))) return; attack(g, e, g.player, "shoots"); return; }
+    approach(); return; // out of range or no LOS: close in
+  }
+
+  if (t.behavior === "flee" && aware) {
+    if (moveEnemy(g, e, fieldCandidates(g, e, flow, "up"))) return; // run
+    if (cheby === 1) { attack(g, e, g.player); return; }            // cornered: bite
+    return;                                                          // truly stuck: hold
+  }
+
+  // Melee (and any archetype while unaware): strike if adjacent, else move.
+  if (aware && cheby === 1) { attack(g, e, g.player); return; }
+  approach();
+}
+
+// Test/utility helper: run one round where every alive enemy acts once, in id
+// order. The live game drives enemies through the scheduler instead.
+function enemyPhase(g) {
+  for (const e of g.enemies.slice().sort((a, b) => a.id - b.id)) enemyAct(g, e);
+}
+
+/* --- Combat --------------------------------------------------------------- */
+
+function pushMsg(g, text) {
+  g.messages.push(text);
+  if (g.messages.length > 6) g.messages.shift();
+}
+function playerAttackPower(g) { return PLAYER_ATTACK + g.player.weaponBonus + g.player.attackBonus; }
+
+function attack(g, attacker, defender, verb = "hits") {
+  const isPlayer = attacker === g.player;
+  let dmg = isPlayer ? playerAttackPower(g) : attacker.damage; // enemy damage is depth-scaled
+  dmg += g.floor.rng.combat.range(-1, 1); // small deterministic variance
+  if (dmg < 1) dmg = 1;
+  defender.hp -= dmg;
+  if (isPlayer) pushMsg(g, `You hit the ${ENEMY_TYPES[defender.typeId].name} for ${dmg}.`);
+  else pushMsg(g, `The ${ENEMY_TYPES[attacker.typeId].name} ${verb} you for ${dmg}.`);
+  if (defender.hp <= 0) {
+    if (defender === g.player) { g.player.alive = false; g.gameOver = true; g.overReason = "killed"; }
+    else { defender.alive = false; g.kills++; pushMsg(g, `The ${ENEMY_TYPES[defender.typeId].name} dies.`); }
+  }
+}
+
+/* --- Item effects (orthogonal) ------------------------------------------- */
+
+function applyItem(g, defId) {
+  const ef = ITEM_DEFS[defId].effect;
+  const p = g.player;
+  switch (ef.type) {
+    case "heal": {
+      const before = p.hp; p.hp = Math.min(p.maxHp, p.hp + ef.amount);
+      pushMsg(g, `You heal ${p.hp - before} HP.`); break;
+    }
+    case "weapon":
+      p.weaponBonus = ef.bonus; p.weaponName = ITEM_DEFS[defId].name;
+      pushMsg(g, `You wield the ${p.weaponName}.`); break;
+    case "strength":
+      p.attackBonus += ef.amount; pushMsg(g, `Your attacks feel stronger (+${ef.amount}).`); break;
+    case "regen":
+      p.regen += ef.turns; pushMsg(g, `Warmth spreads — regenerating.`); break;
+    case "blink": doBlink(g, ef.range); break;
+    case "area": doFirebomb(g, ef.radius, ef.damage); break;
+  }
+}
+
+// Blink: teleport to the reachable tile within range that maximises distance to
+// the nearest enemy (ties broken by the combat stream). A clean escape tool.
+function doBlink(g, range) {
+  const flow = updateFlow(g);
+  const eDist = distField8(g.tiles, g.enemies.filter((e) => e.alive).map((e) => idx(e.x, e.y)));
+  const anyEnemy = g.enemies.some((e) => e.alive);
+  let best = null, bestScore = -Infinity;
+  const order = [];
+  for (let i = 0; i < g.tiles.length; i++) {
+    if (flow[i] === UNREACHABLE || flow[i] > range || flow[i] === 0) continue;
+    if (!tileWalkable(g.tiles[i])) continue;
+    order.push(i);
+  }
+  g.floor.rng.combat.shuffle(order); // shuffle first so ties resolve deterministically
+  for (const i of order) {
+    const score = anyEnemy ? eDist[i] : 0;
+    if (score > bestScore) { bestScore = score; best = i; }
+  }
+  if (best != null) {
+    g.player.prevX = g.player.x; g.player.prevY = g.player.y;
+    g.player.x = best % MAP_W; g.player.y = (best / MAP_W) | 0;
+    pushMsg(g, "You blink away.");
+  } else pushMsg(g, "The blink fizzles.");
+}
+
+// Firebomb: damage every enemy within `radius` of the nearest enemy to the
+// player (area effect). No enemy nearby -> wasted, like any thrown item.
+function doFirebomb(g, radius, damage) {
+  let target = null, bestD = Infinity;
+  for (const e of g.enemies) {
+    if (!e.alive) continue;
+    const d = Math.max(Math.abs(e.x - g.player.x), Math.abs(e.y - g.player.y));
+    if (d < bestD) { bestD = d; target = e; }
+  }
+  if (!target) { pushMsg(g, "The firebomb bursts on empty stone."); return; }
+  let hit = 0;
+  for (const e of g.enemies) {
+    if (!e.alive) continue;
+    if (Math.max(Math.abs(e.x - target.x), Math.abs(e.y - target.y)) <= radius) {
+      e.hp -= damage; hit++;
+      if (e.hp <= 0) { e.alive = false; g.kills++; }
+    }
+  }
+  pushMsg(g, `The firebomb scorches ${hit} enem${hit === 1 ? "y" : "ies"}.`);
+}
+
+/* --- Inventory + player actions ------------------------------------------ */
+
+// Returns false if the pack is full. Consumables stack; weapon/upgrade each
+// take a slot (scarcity forces choices about what to keep).
+function addToInventory(g, defId) {
+  if (ITEM_DEFS[defId].kind === "consumable") {
+    const stack = g.inventory.find((s) => s.defId === defId);
+    if (stack) { stack.count++; return true; }
+  }
+  if (g.inventory.length >= INV_CAP) return false;
+  g.inventory.push({ defId, count: 1 });
+  return true;
+}
+
+function itemAt(g, x, y) { return g.items.find((it) => it.x === x && it.y === y); }
+
+// Every player action funnels through here: it spends energy, ticks buffs and
+// FOV, advances the turn counter, then lets the scheduler run enemies until it
+// is the player's turn again.
+function endPlayerAction(g) {
+  g.player.energy -= ACTION_COST;
+  if (g.player.alive) {
+    if (g.player.regen > 0) { g.player.regen--; g.player.hp = Math.min(g.player.maxHp, g.player.hp + REGEN_PER_TURN); }
+    // Slow passive regen so exploration recovers chip damage between fights.
+    g.player.regenClock = (g.player.regenClock || 0) + 1;
+    if (g.player.regenClock >= PASSIVE_REGEN_INTERVAL) { g.player.regenClock = 0; g.player.hp = Math.min(g.player.maxHp, g.player.hp + 1); }
+  }
+  updateFOV(g);
+  g.turn++;
+  advanceGame(g);
+}
+
+// Move, or attack an enemy in the way, or wait. Returns true if a turn was spent.
+function playerMove(g, dx, dy) {
+  if (g.gameOver || !g.player.alive) return false;
+  if (dx === 0 && dy === 0) { endPlayerAction(g); return true; } // wait
+  const nx = g.player.x + dx, ny = g.player.y + dy;
+  const target = g.enemies.find((e) => e.alive && e.x === nx && e.y === ny);
+  if (target) { attack(g, g.player, target); endPlayerAction(g); return true; }
+  if (tryMovePlayer(g, dx, dy)) { endPlayerAction(g); return true; }
+  return false; // blocked wall: no turn consumed
+}
+
+function playerPickup(g) {
+  if (g.gameOver) return false;
+  const it = itemAt(g, g.player.x, g.player.y);
+  if (!it) { pushMsg(g, "Nothing here to pick up."); return false; }
+  if (!addToInventory(g, it.defId)) { pushMsg(g, "Your pack is full."); return false; }
+  g.items = g.items.filter((o) => o !== it);
+  g.itemsFound++;
+  pushMsg(g, `You pick up the ${ITEM_DEFS[it.defId].name}.`);
+  endPlayerAction(g);
+  return true;
+}
+
+function usePlayerItem(g, slot) {
+  if (g.gameOver) return false;
+  const st = g.inventory[slot];
+  if (!st) return false;
+  const def = ITEM_DEFS[st.defId];
+  applyItem(g, st.defId);
+  if (def.kind === "consumable") { st.count--; if (st.count <= 0) g.inventory.splice(slot, 1); }
+  else g.inventory.splice(slot, 1); // weapon/upgrade consumed on use (equipped/absorbed)
+  endPlayerAction(g);
+  return true;
+}
+
+/* --- Energy scheduler ----------------------------------------------------- */
+
+// Every actor gains `speed` energy per tick and acts when it reaches ACTION_COST,
+// paying it. A 150-speed enemy therefore acts more often than a 100-speed player
+// — speed variety for free, with no real-time loop.
+function tickEnergy(g) {
+  if (g.player.alive) g.player.energy += g.player.speed;
+  for (const e of g.enemies) if (e.alive) e.energy += e.speed;
+  g.ticks++;
+}
+
+// The next actor to act: the ready actor (energy >= cost) with the most energy,
+// player winning ties, then lower enemy id. Ticks time forward until someone is
+// ready. Deterministic ordering, never engine order.
+function nextReady(g) {
+  for (let guard = 0; guard < 1000000; guard++) {
+    // Prefer higher energy; among equal energy prefer the player, else lower id.
+    let pick = null, pe = -1, pIsEnemy = 1, pid = 0;
+    if (g.player.alive && g.player.energy >= ACTION_COST) { pick = g.player; pe = g.player.energy; pIsEnemy = 0; pid = -1; }
+    for (const e of g.enemies) {
+      if (!e.alive || e.energy < ACTION_COST) continue;
+      if (e.energy > pe) { pick = e; pe = e.energy; pIsEnemy = 1; pid = e.id; }
+      else if (e.energy === pe && pIsEnemy === 1 && e.id < pid) { pick = e; pid = e.id; }
+    }
+    if (pick) return pick;
+    tickEnergy(g);
+  }
+  throw new Error("scheduler stalled");
+}
+
+// Run enemy turns until it is the player's turn to input (or the run ends).
+function advanceGame(g) {
+  if (g.gameOver) return;
+  for (let guard = 0; guard < 1000000; guard++) {
+    const a = nextReady(g);
+    if (a === g.player) return;    // player's turn: wait for input
+    enemyAct(g, a);
+    a.energy -= ACTION_COST;
+    if (!g.player.alive) { g.gameOver = true; g.overReason = g.overReason || "killed"; return; }
+  }
+  throw new Error("advanceGame stalled");
+}
+
+// Pure counting model for the energy invariant (test 8): returns per-actor action
+// counts over `ticks` ticks. Same rules as the live scheduler, no world state.
+function simulateEnergy(speeds, ticks) {
+  const energy = speeds.map(() => 0), acts = speeds.map(() => 0);
+  for (let t = 0; t < ticks; t++) {
+    for (let i = 0; i < speeds.length; i++) {
+      energy[i] += speeds[i];
+      while (energy[i] >= ACTION_COST) { energy[i] -= ACTION_COST; acts[i]++; }
+    }
+  }
+  return acts;
+}
+
+// 8-dir move with the corner rule: a diagonal step is blocked only when BOTH
+// orthogonal cells it passes between are walls — that's the "squeeze through
+// the gap between two wall corners" case the spec calls out. Brushing a single
+// corner is allowed.
+function tryMovePlayer(g, dx, dy) {
+  const p = g.player;
+  const nx = p.x + dx, ny = p.y + dy;
+  if (!isWalkable(g, nx, ny)) return false;
+  if (dx !== 0 && dy !== 0) {
+    const sideA = isWalkable(g, p.x + dx, p.y);
+    const sideB = isWalkable(g, p.x, p.y + dy);
+    if (!sideA && !sideB) return false; // blocked corner gap
+  }
+  p.prevX = p.x; p.prevY = p.y;
+  p.x = nx; p.y = ny;
+  return true;
+}
+
+// Advance one player turn. In M1 the only actor is the player; the energy
+// system and enemy turns arrive in later milestones. `waited` records a
+// deliberate pass so waiting still counts as a turn.
+function stepPlayer(g, dx, dy) {
+  const isWait = dx === 0 && dy === 0;
+  const moved = isWait ? true : tryMovePlayer(g, dx, dy);
+  if (moved) {
+    g.turn++;
+    if (!isWait) updateFOV(g); // waiting can't change what's visible
+  }
+  return moved;
+}
+
+/* =========================================================================
+ * HASHING  —  verification support
+ * =======================================================================*/
+
+// Stable 32-bit rolling hash of an integer stream (FNV-1a style).
+function makeHasher() {
+  let h = 0x811c9dc5 >>> 0;
+  return {
+    push(n) {
+      n = n | 0;
+      for (let s = 0; s < 32; s += 8) {
+        h ^= (n >>> s) & 0xff;
+        h = Math.imul(h, 0x01000193) >>> 0;
+      }
+    },
+    value() { return h >>> 0; },
+  };
+}
+
+// hashRun: generate a floor and hash everything the seed is supposed to fix.
+// ONE combined hash whose coverage grows each milestone, so "floor 5 changed
+// because I sprinted here" is caught across every system at once, not per-part.
+//   M2: tile grid + spawn + stairs.
+//   M4/M5 will append enemy and item placements at the marked points below —
+//   each fed through the SAME hasher in a stable, id-sorted order.
+function hashRun(seedString, depth) {
+  const f = generateFloor(seedString, depth);
+  const hasher = makeHasher();
+  for (let i = 0; i < f.tiles.length; i++) hasher.push(f.tiles[i]);   // terrain (STAIRS included)
+  hasher.push(f.spawn.x); hasher.push(f.spawn.y);
+  hasher.push(f.stairs.x); hasher.push(f.stairs.y);
+  // enemies, in stable id order so iteration never depends on engine ordering
+  for (const e of f.enemies.slice().sort((a, b) => a.id - b.id)) {
+    hasher.push(e.x); hasher.push(e.y); hasher.push(fnv1a(e.typeId));
+  }
+  // items, in stable instance-id order
+  for (const it of f.items.slice().sort((a, b) => a.iid - b.iid)) {
+    hasher.push(it.x); hasher.push(it.y); hasher.push(fnv1a(it.defId));
+  }
+  return hasher.value();
+}
+
+/* =========================================================================
+ * TESTS  —  runTests() from console or ?test=1
+ * =======================================================================*/
+
+// Generate `n` floors across `n` seeds at depths 1..maxDepth and collect stats.
+// Used by test 3/4 and by the debug "generate 500 floors" button. Returns
+// structured data plus a printable report with room-count and area histograms.
+function generateReport(n = 1000, maxDepth = 10) {
+  const times = [];
+  const roomCounts = [];
+  const areas = [];
+  let totalRegens = 0, worstRegens = 0;
+  const failures = [];
+  const hasTime = typeof performance !== "undefined" && performance.now;
+  const clock = hasTime ? () => performance.now() : () => Number(process.hrtime.bigint()) / 1e6;
+
+  for (let i = 0; i < n; i++) {
+    const seed = "report-" + i;
+    const depth = 1 + (i % maxDepth);
+    const t0 = clock();
+    let f;
+    try { f = generateFloor(seed, depth); }
+    catch (e) { failures.push({ seed, depth, error: String(e.message || e) }); continue; }
+    times.push(clock() - t0);
+    roomCounts.push(f.rooms.length);
+    let area = 0;
+    for (let k = 0; k < f.tiles.length; k++) if (tileWalkable(f.tiles[k])) area++;
+    areas.push(area);
+    totalRegens += f.regens;
+    if (f.regens > worstRegens) worstRegens = f.regens;
+
+    // Per-floor invariants (test 3): connectivity, no entity in a wall,
+    // stairs reachable and far enough, no key/door softlock.
+    const dist = bfsDistance(f.tiles, [idx(f.spawn.x, f.spawn.y)]);
+    let floorTiles = 0, reach = 0;
+    for (let k = 0; k < f.tiles.length; k++) if (tileWalkable(f.tiles[k])) { floorTiles++; if (dist[k] >= 0) reach++; }
+    if (reach !== floorTiles) failures.push({ seed, depth, error: "not fully connected" });
+    if (!tileWalkable(f.tiles[idx(f.spawn.x, f.spawn.y)])) failures.push({ seed, depth, error: "spawn in wall" });
+    if (f.tiles[idx(f.stairs.x, f.stairs.y)] !== TILE.STAIRS) failures.push({ seed, depth, error: "stairs not placed" });
+    if (dist[idx(f.stairs.x, f.stairs.y)] < requiredStairDist(depth)) failures.push({ seed, depth, error: "stairs too close" });
+    // Enemy placement rules (now real, as promised when the framework was built):
+    // on a walkable tile, >=6 path-tiles from spawn, out of spawn's line of sight,
+    // and never in the spawn room.
+    const spawnFOV = computeFOV(f.tiles, f.spawn.x, f.spawn.y, FOV_RADIUS);
+    const sr = f.rooms[f.spawnRoom];
+    for (const e of f.enemies) {
+      const ei = idx(e.x, e.y);
+      if (!tileWalkable(f.tiles[ei])) failures.push({ seed, depth, error: "enemy in wall" });
+      if (dist[ei] >= 0 && dist[ei] < 6) failures.push({ seed, depth, error: "enemy within 6 of spawn" });
+      if (spawnFOV[ei]) failures.push({ seed, depth, error: "enemy visible from spawn" });
+      if (e.x >= sr.x && e.x <= sr.x2 && e.y >= sr.y && e.y <= sr.y2) failures.push({ seed, depth, error: "enemy in spawn room" });
+    }
+    // Item rules: on a walkable non-stairs tile; at least one healing item every
+    // floor; at least one weapon/upgrade every two floors (odd depths).
+    for (const it of f.items) {
+      if (f.tiles[idx(it.x, it.y)] !== TILE.FLOOR) failures.push({ seed, depth, error: "item not on floor tile" });
+    }
+    if (!f.items.some((it) => isHealItem(it.defId))) failures.push({ seed, depth, error: "no healing item" });
+    if (depth % 2 === 1 && !f.items.some((it) => isWeaponOrUpgrade(it.defId)))
+      failures.push({ seed, depth, error: "no weapon/upgrade on odd floor" });
+    // key/door softlock: no locked doors exist yet. Nothing to check — asserted
+    // honestly rather than faked as passing.
+  }
+
+  times.sort((a, b) => a - b);
+  const pct = (p) => times.length ? times[Math.min(times.length - 1, Math.floor(p * times.length))] : 0;
+  const stats = {
+    n, generated: times.length, failures,
+    p50: pct(0.50), p95: pct(0.95), max: times[times.length - 1] || 0,
+    totalRegens, worstRegens,
+    roomCounts, areas,
+  };
+
+  // ASCII histogram over a value array.
+  const histo = (arr, buckets, lo, hi, label) => {
+    const bins = new Array(buckets).fill(0);
+    for (const v of arr) {
+      let b = Math.floor(((v - lo) / (hi - lo)) * buckets);
+      b = Math.max(0, Math.min(buckets - 1, b));
+      bins[b]++;
+    }
+    const peak = Math.max(1, ...bins);
+    let out = "  " + label + "\n";
+    for (let b = 0; b < buckets; b++) {
+      const from = Math.round(lo + (b / buckets) * (hi - lo));
+      const bar = "#".repeat(Math.round((bins[b] / peak) * 40));
+      out += "    " + String(from).padStart(5) + " |" + bar + " " + bins[b] + "\n";
+    }
+    return out;
+  };
+  const minA = Math.min(...areas), maxA = Math.max(...areas);
+  const minR = Math.min(...roomCounts), maxR = Math.max(...roomCounts);
+  stats.report =
+    `GEN REPORT: ${stats.generated}/${n} floors, ${failures.length} failures\n` +
+    `  time  p50 ${stats.p50.toFixed(2)}ms  p95 ${stats.p95.toFixed(2)}ms  max ${stats.max.toFixed(2)}ms\n` +
+    `  regens  total ${totalRegens}  worst ${worstRegens}\n` +
+    histo(roomCounts, Math.max(1, maxR - minR + 1), minR, maxR + 1, `room count [${minR}..${maxR}]`) +
+    histo(areas, 12, minA, maxA + 1, `floor area (walkable tiles) [${minA}..${maxA}]`) +
+    (failures.length ? "  FAILURES:\n" + failures.slice(0, 10).map((f) => "    " + JSON.stringify(f)).join("\n") : "");
+  return stats;
+}
+
+// A "competent player" bot: heals when hurt, firebombs clusters, blinks out of
+// a bad spot, kills what's adjacent, grabs loot, and heads for the stairs. It's
+// the yardstick for the difficulty curve — not perfect play, but not reckless.
+function competentBot(seed) {
+  let g = createGame(seed, 1);
+  advanceGame(g);
+  const records = [];
+  const cheby = (e) => Math.max(Math.abs(e.x - g.player.x), Math.abs(e.y - g.player.y));
+  const slotOfHeal = () => g.inventory.findIndex((s) => isHealItem(s.defId));
+  const slotOfEffect = (type) => g.inventory.findIndex((s) => ITEM_DEFS[s.defId].effect.type === type);
+  const composition = () => {
+    const c = {}; for (const e of g.enemies) if (e.alive) c[e.typeId] = (c[e.typeId] || 0) + 1; return c;
+  };
+  let fl = { depth: g.depth, enemies: g.enemies.length, comp: composition(), minHp: g.player.hp };
+  const closeFloor = (died) => records.push({
+    depth: fl.depth, enemies: fl.enemies, comp: fl.comp,
+    endHpPct: Math.max(0, g.player.hp) / g.player.maxHp, minHpPct: Math.max(0, fl.minHp) / g.player.maxHp, died,
+  });
+
+  let budget = 12000;
+  while (!g.gameOver && budget-- > 0) {
+    const p = g.player;
+    if (g.tiles[idx(p.x, p.y)] === TILE.STAIRS) {
+      closeFloor(false);
+      if (g.depth >= 10) return { records, reached: 10, died: false };
+      g = descend(g); advanceGame(g);
+      fl = { depth: g.depth, enemies: g.enemies.length, comp: composition(), minHp: g.player.hp };
+      continue;
+    }
+    fl.minHp = Math.min(fl.minHp, p.hp);
+    const adj = g.enemies.filter((e) => e.alive && cheby(e) === 1);
+    const near = g.enemies.filter((e) => e.alive && cheby(e) <= 3);
+
+    if (p.hp <= Math.floor(p.maxHp * 0.4) && slotOfHeal() >= 0) { usePlayerItem(g, slotOfHeal()); continue; }
+    if (near.length >= 3 && slotOfEffect("area") >= 0) { usePlayerItem(g, slotOfEffect("area")); continue; }
+    if (p.hp <= Math.floor(p.maxHp * 0.35) && adj.length >= 2 && slotOfEffect("blink") >= 0) { usePlayerItem(g, slotOfEffect("blink")); continue; }
+    if (adj.length) { adj.sort((a, b) => a.hp - b.hp); const t = adj[0]; playerMove(g, Math.sign(t.x - p.x), Math.sign(t.y - p.y)); continue; }
+    if (itemAt(g, p.x, p.y)) { playerPickup(g); continue; }
+    // Run down nearby archers (they punish a fleeing back); otherwise head for
+    // the stairs and only fight what's adjacent — a competent player dives past a
+    // slow melee boss rather than trading blows with it.
+    const flow = updateFlow(g);
+    let tgt = null, tb = 8;
+    for (const e of g.enemies) {
+      if (!e.alive || ENEMY_TYPES[e.typeId].behavior !== "ranged") continue;
+      const d = flow[idx(e.x, e.y)];
+      if (d !== UNREACHABLE && d >= 0 && d < tb) { tb = d; tgt = e; }
+    }
+    const goalField = tgt ? distField8(g.tiles, [idx(tgt.x, tgt.y)])
+                          : distField8(g.tiles, [idx(g.floor.stairs.x, g.floor.stairs.y)]);
+    const sf = goalField;
+    let bestV = sf[idx(p.x, p.y)], step = null;
+    for (const { dx, dy } of DIRS8) {
+      const nx = p.x + dx, ny = p.y + dy;
+      if (!inBounds(nx, ny) || !tileWalkable(g.tiles[idx(nx, ny)])) continue;
+      if (dx !== 0 && dy !== 0 &&
+          !tileWalkable(g.tiles[idx(p.x + dx, p.y)]) && !tileWalkable(g.tiles[idx(p.x, p.y + dy)])) continue;
+      const v = sf[idx(nx, ny)];
+      if (v !== UNREACHABLE && v < bestV) { bestV = v; step = { dx, dy }; }
+    }
+    if (step) { if (!playerMove(g, step.dx, step.dy)) playerMove(g, 0, 0); }
+    else playerMove(g, 0, 0);
+  }
+  closeFloor(true);
+  return { records, reached: g.depth, died: g.gameOver };
+}
+
+// Play N seeds with the competent bot and summarise the curve per depth: enemy
+// count, archetype mix, how much HP the player kept, how close it came to death,
+// and the clear rate. This is the M6 "where did it feel flat or unfair" report.
+function balanceReport(nSeeds = 40) {
+  const byDepth = {};
+  for (let d = 1; d <= 10; d++) byDepth[d] = { floors: 0, endHp: 0, minHp: 0, enemies: 0, deaths: 0, comp: {} };
+  let cleared = 0; const deathDepths = [];
+  for (let s = 0; s < nSeeds; s++) {
+    const r = competentBot("bal-" + s);
+    if (r.reached >= 10 && !r.died) cleared++;
+    if (r.died) deathDepths.push(r.reached);
+    for (const rec of r.records) {
+      const b = byDepth[rec.depth];
+      b.floors++; b.endHp += rec.endHpPct; b.minHp += rec.minHpPct; b.enemies += rec.enemies;
+      if (rec.died) b.deaths++;
+      for (const k in rec.comp) b.comp[k] = (b.comp[k] || 0) + rec.comp[k];
+    }
+  }
+  let out = `BALANCE REPORT — competent bot, ${nSeeds} seeds, floors 1-10\n`;
+  out += `  clear rate (reached depth 10 alive): ${cleared}/${nSeeds} (${Math.round(100 * cleared / nSeeds)}%)\n`;
+  out += `  depth | n  | avg enemies | end HP% | min HP% | deaths | archetype mix\n`;
+  for (let d = 1; d <= 10; d++) {
+    const b = byDepth[d]; if (!b.floors) continue;
+    const mix = Object.keys(b.comp).sort().map((k) => `${k[0]}${Math.round(b.comp[k] / b.floors)}`).join(" ");
+    out += `  ${String(d).padStart(5)} | ${String(b.floors).padStart(2)} | ` +
+      `${(b.enemies / b.floors).toFixed(1).padStart(11)} | ` +
+      `${String(Math.round(100 * b.endHp / b.floors)).padStart(6)}% | ` +
+      `${String(Math.round(100 * b.minHp / b.floors)).padStart(6)}% | ` +
+      `${String(b.deaths).padStart(6)} | ${mix}\n`;
+  }
+  return { report: out, cleared, nSeeds, deathDepths };
+}
+
+function runTests() {
+  let pass = 0, fail = 0;
+  const results = [];
+  function check(name, cond, detail) {
+    if (cond) { pass++; results.push("  PASS  " + name); }
+    else { fail++; results.push("  FAIL  " + name + (detail ? "  — " + detail : "")); }
+  }
+
+  // Test 1: same seed -> identical floor hash, twice in a session.
+  const h1 = hashRun("hello-world", 1);
+  const h2 = hashRun("hello-world", 1);
+  check("1. same seed -> identical floor hash (twice)", h1 === h2,
+        h1.toString(16) + " vs " + h2.toString(16));
+
+  // (Across-reload is exercised by ?test=1 running fresh on load; the value is
+  // pinned here so a reload that produced a different hash would be caught.)
+  check("1b. floor hash is stable to a pinned value", h1 === EXPECTED_HELLO_D1,
+        "got " + h1.toString(16) + " expected " + EXPECTED_HELLO_D1.toString(16));
+
+  // Test 2: 200 seeds -> 200 distinct hashes (catches a seed silently ignored).
+  const seen = new Set();
+  let collisions = 0;
+  for (let i = 0; i < 200; i++) {
+    const hv = hashRun("seed-" + i, 1);
+    if (seen.has(hv)) collisions++;
+    seen.add(hv);
+  }
+  check("2. 200 seeds -> 200 distinct hashes", seen.size === 200,
+        "distinct=" + seen.size + " collisions=" + collisions);
+
+  // Test 5: source never calls the built-in JS RNG. Pattern built from parts so
+  // this line does not itself contain the literal it forbids.
+  const forbiddenRng = new RegExp("Math" + "\\s*\\.\\s*" + "random");
+  check("5. no built-in RNG call in source", !forbiddenRng.test(SOURCE_TEXT));
+
+  // Extra: split streams are independent — same seed, different salts diverge.
+  const st = makeStreams("indep", 3);
+  check("streams: map != items for same seed/depth", st.map.next() !== st.items.next());
+
+  // Extra: shuffle is deterministic given a seed.
+  const a1 = makeStream(12345).shuffle([1,2,3,4,5,6,7,8].slice());
+  const a2 = makeStream(12345).shuffle([1,2,3,4,5,6,7,8].slice());
+  check("shuffle is deterministic", a1.join() === a2.join());
+
+  // Extra: depth changes the map layout for the same seed.
+  check("depth changes floor hash for same seed", hashRun("same", 1) !== hashRun("same", 2));
+
+  // FOV gate (Milestone 3): light must NOT leak through the corner contact
+  // between two diagonally-touching walls. Build an all-wall grid, carve an
+  // observer cell and open ONLY the diagonal neighbour (with both orthogonal
+  // cells between them left as walls). A correct algorithm cannot see it.
+  {
+    const g = new Uint8Array(MAP_W * MAP_H).fill(TILE.WALL);
+    const ox = 10, oy = 10;
+    g[idx(ox, oy)] = TILE.FLOOR;          // observer
+    g[idx(ox + 1, oy + 1)] = TILE.FLOOR;  // diagonal opening only
+    g[idx(ox + 2, oy + 2)] = TILE.FLOOR;  // and beyond it
+    // (ox+1,oy) and (ox,oy+1) stay WALL — the two corners the light would squeeze between.
+    const vis = computeFOV(g, ox, oy, 9);
+    check("FOV: no leak through diagonal wall corner",
+          vis[idx(ox + 1, oy + 1)] === 0 && vis[idx(ox + 2, oy + 2)] === 0);
+  }
+  // And the positive control: an orthogonal opening DOES reveal what's beyond,
+  // so the algorithm isn't just blocking everything.
+  {
+    const g = new Uint8Array(MAP_W * MAP_H).fill(TILE.WALL);
+    const ox = 10, oy = 10;
+    g[idx(ox, oy)] = TILE.FLOOR;
+    g[idx(ox + 1, oy)] = TILE.FLOOR;
+    g[idx(ox + 2, oy)] = TILE.FLOOR;
+    const vis = computeFOV(g, ox, oy, 9);
+    check("FOV: straight opening reveals tiles beyond", vis[idx(ox + 2, oy)] === 1);
+  }
+  // FOV is a pure function: same inputs -> identical visible set.
+  {
+    const f = generateFloor("fov-determinism", 3);
+    const a = computeFOV(f.tiles, f.spawn.x, f.spawn.y);
+    const b = computeFOV(f.tiles, f.spawn.x, f.spawn.y);
+    let same = a.length === b.length;
+    for (let i = 0; same && i < a.length; i++) same = a[i] === b[i];
+    check("FOV: deterministic for same observer + map", same);
+  }
+  // Guard the restrictive rule against over-filtering: in a wide-open room the
+  // observer must see EVERY floor cell within radius — no diagonal blind streaks.
+  {
+    const g = new Uint8Array(MAP_W * MAP_H).fill(TILE.FLOOR);
+    const ox = 22, oy = 22, R = 6;
+    const vis = computeFOV(g, ox, oy, R);
+    let holes = 0;
+    for (let y = oy - R; y <= oy + R; y++)
+      for (let x = ox - R; x <= ox + R; x++)
+        if ((x - ox) * (x - ox) + (y - oy) * (y - oy) <= R * R && vis[idx(x, y)] !== 1) holes++;
+    check("FOV: open room fully lit within radius (no over-filtering)", holes === 0, holes + " blind cells");
+  }
+
+  // Test 6: a hunter dropped at a random reachable point reaches the player
+  // within 200 turns on every connected map. Drives the flow field directly.
+  {
+    const R = makeStream(0xC0FFEE);
+    let reachedAll = true, failInfo = "";
+    for (let s = 0; s < 200 && reachedAll; s++) {
+      const g = createGame("chase-" + s, 1);
+      const flow0 = distField8(g.tiles, [idx(g.player.x, g.player.y)]);
+      const reach = [];
+      for (let i = 0; i < flow0.length; i++) if (flow0[i] > 0) reach.push(i);
+      const start = reach[Math.floor(R.next() * reach.length)];
+      const e = makeEnemy(0, start % MAP_W, (start / MAP_W) | 0, "grunt");
+      g.enemies = [e]; g.flow = null; g.flowFrom = -1;
+      let reached = false;
+      for (let t = 0; t < 200; t++) {
+        huntStep(g, e);
+        if (Math.max(Math.abs(e.x - g.player.x), Math.abs(e.y - g.player.y)) <= 1) { reached = true; break; }
+      }
+      if (!reached) { reachedAll = false; failInfo = "chase-" + s + " stuck at " + e.x + "," + e.y; }
+    }
+    check("6. enemy reaches player within 200 turns on 200 maps", reachedAll, failInfo);
+  }
+
+  // Clumping: two enemies pursuing the same player never end a turn stacked on
+  // one tile, and the flood serves both.
+  {
+    const g = createGame("clump", 1);
+    const flow = distField8(g.tiles, [idx(g.player.x, g.player.y)]);
+    const reach = [];
+    for (let i = 0; i < flow.length; i++) if (flow[i] > 1) reach.push(i);
+    g.enemies = [makeEnemy(0, reach[0] % MAP_W, (reach[0] / MAP_W) | 0, "grunt"),
+                 makeEnemy(1, reach[1] % MAP_W, (reach[1] / MAP_W) | 0, "grunt")];
+    g.enemies.forEach((e) => { e.state = "hunting"; e.lastKnown = { x: g.player.x, y: g.player.y }; });
+    g.flow = null;
+    let stacked = false;
+    for (let t = 0; t < 120; t++) {
+      enemyPhase(g);
+      if (g.enemies[0].x === g.enemies[1].x && g.enemies[0].y === g.enemies[1].y) { stacked = true; break; }
+    }
+    check("enemies never stack on one tile (clumping handled)", !stacked);
+  }
+
+  // Test 8: the energy invariant. A 150-speed actor acts exactly twice as often
+  // as a 75-speed one over 1000 ticks.
+  {
+    const acts = simulateEnergy([150, 75], 1000);
+    check("8. energy: 150-speed acts exactly 2x a 75-speed over 1000 ticks",
+          acts[0] === 2 * acts[1] && acts[0] === 1500 && acts[1] === 750,
+          "acts=" + JSON.stringify(acts));
+  }
+
+  // Test 7: a full 10-floor descent driven headlessly by a "head for the stairs"
+  // bot — attack what blocks the path, quaff a potion when badly hurt, descend on
+  // the stairs. Must complete without throwing and terminate (reach depth 10 or die).
+  {
+    let threw = null, finalDepth = 0, died = false;
+    try {
+      let g = createGame("playthrough", 1);
+      advanceGame(g);
+      let budget = 20000;
+      while (!g.gameOver && g.depth <= 10 && budget-- > 0) {
+        if (g.depth === 10 && g.tiles[idx(g.player.x, g.player.y)] === TILE.STAIRS) break; // reached the bottom
+        if (g.tiles[idx(g.player.x, g.player.y)] === TILE.STAIRS) { g = descend(g); advanceGame(g); continue; }
+        // Emergency heal.
+        if (g.player.hp <= 10) {
+          const slot = g.inventory.findIndex((s) => isHealItem(s.defId));
+          if (slot >= 0) { usePlayerItem(g, slot); continue; }
+        }
+        // Grab anything underfoot.
+        if (itemAt(g, g.player.x, g.player.y)) { playerPickup(g); continue; }
+        // Step toward the stairs down the stairs-flow field; attack blockers.
+        const sf = distField8(g.tiles, [idx(g.floor.stairs.x, g.floor.stairs.y)]);
+        const here = sf[idx(g.player.x, g.player.y)];
+        let step = null, bestV = here;
+        for (const { dx, dy } of DIRS8) {
+          const nx = g.player.x + dx, ny = g.player.y + dy;
+          if (!inBounds(nx, ny) || !tileWalkable(g.tiles[idx(nx, ny)])) continue;
+          if (dx !== 0 && dy !== 0 &&
+              !tileWalkable(g.tiles[idx(g.player.x + dx, g.player.y)]) && !tileWalkable(g.tiles[idx(g.player.x, g.player.y + dy)])) continue;
+          const v = sf[idx(nx, ny)];
+          if (v !== UNREACHABLE && v < bestV) { bestV = v; step = { dx, dy }; }
+        }
+        if (step) { if (!playerMove(g, step.dx, step.dy)) playerMove(g, 0, 0); }
+        else playerMove(g, 0, 0); // no progress available: wait (enemies come to us)
+      }
+      finalDepth = g.depth; died = g.gameOver;
+    } catch (e) { threw = e; }
+    check("7. headless 10-floor playthrough completes without throwing",
+          threw === null, threw ? String(threw && threw.stack || threw) : "");
+    results.push(`         (reached depth ${finalDepth}${died ? ", died" : ", survived"})`);
+  }
+
+  // Balance regression guard (not a spec gate): the difficulty curve should keep
+  // the early floors survivable. If a change makes the competent bot die before
+  // depth 5 on most seeds, something is badly off. Lenient by design.
+  {
+    let reached5 = 0; const N = 30;
+    for (let s = 0; s < N; s++) if (competentBot("guard-" + s).reached >= 5) reached5++;
+    check("balance: competent bot reaches depth 5 on >=75% of seeds", reached5 >= N * 0.75, reached5 + "/" + N);
+  }
+
+  // Tests 3 & 4: 1000 floors across 1000 seeds, depths 1-10.
+  const rep = generateReport(1000, 10);
+  check("3. 1000 floors: connected, no wall entity, stairs reachable, no softlock",
+        rep.failures.length === 0, rep.failures.length + " failures; first: " +
+        (rep.failures[0] ? JSON.stringify(rep.failures[0]) : "none"));
+  check("4. generation under 50ms at p95", rep.p95 < 50, "p95=" + rep.p95.toFixed(2) + "ms max=" + rep.max.toFixed(2));
+
+  const summary = `TESTS: ${pass} passed, ${fail} failed`;
+  const report = summary + "\n" + results.join("\n");
+  if (typeof console !== "undefined") console.log(report);
+  return { pass, fail, report };
+}
+
+// Pinned expected hash for the "across reload" guarantee: a hardcoded literal,
+// NOT recomputed at boot. Any code change that alters generation flips the live
+// hash away from this frozen value and test 1b catches it. Re-pin deliberately
+// (run ?test=1, read the reported value) when a generation change is intended.
+const EXPECTED_HELLO_D1 = 0x4B87EE43 >>> 0; // seed "hello-world", depth 1 (terrain + enemies + items)
+
+// SOURCE_TEXT is filled in by the environment: the browser reads its own
+// <script>, Node passes the file text in. Test 5 greps it.
+let SOURCE_TEXT = "";
+
+/* =========================================================================
+ * PUBLIC API  —  what render + tests reach for
+ * =======================================================================*/
+const API = {
+  fnv1a, mulberry32, makeStream, makeStreams, mixSeed, STREAM_SALTS,
+  generateFloor, createGame, descend, tryMovePlayer, isWalkable, tileAt, inBounds,
+  bfsDistance, computeFOV, updateFOV, FOV_RADIUS,
+  distField8, updateFlow, enemyPhase, enemyAct, enemyThink, huntStep, hasLOS, enemySees, makeEnemy,
+  playerMove, playerPickup, usePlayerItem, itemAt, advanceGame, nextReady, simulateEnergy, attack,
+  hashRun, generateReport, balanceReport, competentBot, runTests,
+  TILE, DIRS8, DIRS4, MAP_W, MAP_H, idx, requiredStairDist, ENEMY_TYPES, ITEM_DEFS, UNREACHABLE, INV_CAP,
+  setSource(t) { SOURCE_TEXT = t; },
+};
+
+if (typeof module !== "undefined" && module.exports) module.exports = API;
+if (typeof window !== "undefined") window.RL = API;
+if (typeof globalThis !== "undefined") globalThis.RL = API;
+
+/* =========================================================================
+ * RENDER + INPUT  —  browser only; never touched by the simulation
+ * =======================================================================*/
+if (typeof document !== "undefined") {
+  API.setSource(document.currentScript ? document.currentScript.textContent : "");
+
+  const canvas = document.getElementById("game");
+  const ctx = canvas.getContext("2d");
+  const CELL = Math.floor(canvas.width / MAP_W); // 16px cells
+
+  const params = new URLSearchParams(location.search);
+  const DEBUG = params.get("debug") === "1";
+
+  let game;
+  const debugState = { revealAll: false, flow: false };
+
+  function pickSeed() {
+    return params.get("seed") || Math.floor(API.mulberry32(fnv1a(String(Date.now())))() * 1e9).toString(36);
+    // ^ cosmetic-only: choosing a *new* random seed string is outside the sim.
+    //   Once chosen, the run is fully deterministic from that string.
+  }
+
+  function log(msg) {
+    game.messages.push(msg);
+    if (game.messages.length > 5) game.messages.shift();
+    renderSide();
+  }
+
+  function newRun(seed, depth = 1) {
+    game = createGame(seed, depth);
+    document.getElementById("seedInput").value = game.seed;
+    document.getElementById("seedShow").textContent = game.seed;
+    document.getElementById("depthShow").textContent = game.depth;
+    game.messages = ["Welcome. Seed: " + game.seed];
+    RL.advanceGame(game); // fast-forward to the player's first turn
+    if (DEBUG) RL.updateFlow(game); // populate the flow cache so the overlay shows pre-move
+    renderSide();
+    draw();
+  }
+
+  function renderHud() {
+    const p = game.player;
+    const pct = Math.max(0, Math.round((p.hp / p.maxHp) * 100));
+    document.getElementById("hud").innerHTML =
+      `<div class="hpbar"><div class="hpfill" style="width:${pct}%"></div>` +
+      `<div class="hptext">${Math.max(0, p.hp)} / ${p.maxHp} HP</div></div>` +
+      `<div class="muted">atk ${4 + p.weaponBonus + p.attackBonus} · ${escapeHtml(p.weaponName)}` +
+      (p.regen > 0 ? ` · regen ${p.regen}` : "") + `</div>` +
+      `<div class="muted">depth ${game.depth} · turn ${game.turn} · kills ${game.kills}</div>` +
+      (game.gameOver ? `<div class="dead">YOU DIED — press New run</div>` : "");
+
+    const inv = document.getElementById("inv");
+    if (!game.inventory.length) { inv.innerHTML = `<div class="muted">inventory empty · walk over items, press g</div>`; return; }
+    inv.innerHTML = `<div class="muted" style="margin-bottom:4px">inventory (${game.inventory.length}/${RL.INV_CAP}) — press number to use</div>` +
+      game.inventory.map((s, i) => {
+        const d = RL.ITEM_DEFS[s.defId];
+        return `<div class="slot"><span><span class="n">${i + 1}</span> <span style="color:${d.color}">${d.glyph}</span> ${escapeHtml(d.name)}</span>` +
+               `<span class="muted">${s.count > 1 ? "x" + s.count : ""}</span></div>`;
+      }).join("");
+  }
+
+  function renderSide() {
+    renderHud();
+    const el = document.getElementById("msglog");
+    el.innerHTML = game.messages.map((m) => "<div>" + escapeHtml(m) + "</div>").join("");
+    if (DEBUG) {
+      const enemyStates = game.enemies.filter((e) => e.alive).map((e) => e.state);
+      document.getElementById("debugPanel").innerHTML =
+        `turn ${game.turn} · player ${game.player.x},${game.player.y} · depth ${game.depth}<br>` +
+        `rooms ${game.floor.rooms.length} · enemies ${enemyStates.length} [${enemyStates.join(",")}]` +
+        (game.floor.regens ? ` · regens ${game.floor.regens}` : "") + `<br>` +
+        `<label><input type="checkbox" id="dbgReveal" ${debugState.revealAll ? "checked" : ""}> reveal all</label>` +
+        `<label><input type="checkbox" id="dbgFlow" ${debugState.flow ? "checked" : ""}> flow field overlay</label>` +
+        `<div class="row"><button id="dbgStep">step turn (wait)</button><button id="dbgStairs">to stairs</button></div>` +
+        `<div class="row"><button id="dbgReport">gen 1000 floors</button></div>` +
+        `<pre id="dbgReportOut" style="white-space:pre;font-size:11px;overflow:auto;max-height:220px;margin:6px 0 0"></pre>`;
+      const rv = document.getElementById("dbgReveal");
+      if (rv) rv.onchange = (e) => { debugState.revealAll = e.target.checked; draw(); };
+      const fv = document.getElementById("dbgFlow");
+      if (fv) fv.onchange = (e) => { debugState.flow = e.target.checked; RL.updateFlow(game); draw(); };
+      document.getElementById("dbgStep").onclick = () => { playerMove(game, 0, 0); draw(); renderSide(); };
+      document.getElementById("dbgStairs").onclick = () => {
+        game.player.x = game.floor.stairs.x; game.player.y = game.floor.stairs.y;
+        RL.updateFOV(game); RL.updateFlow(game); draw(); renderSide();
+      };
+      document.getElementById("dbgReport").onclick = () => {
+        const out = document.getElementById("dbgReportOut");
+        out.textContent = "generating…";
+        setTimeout(() => { out.textContent = generateReport(1000, 10).report; }, 10);
+      };
+    }
+  }
+  function escapeHtml(s) { return s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
+
+  // Three visibility states drive the palette: LIT (visible now), DIM
+  // (remembered — terrain only, no entities), and unknown (black). Debug
+  // reveal-all promotes everything to LIT.
+  const PALETTE = {
+    lit:  { [TILE.WALL]: "#2a3346", [TILE.FLOOR]: "#0f1420", [TILE.STAIRS]: "#0f1420" },
+    dim:  { [TILE.WALL]: "#161b26", [TILE.FLOOR]: "#0a0d13", [TILE.STAIRS]: "#0a0d13" },
+  };
+
+  function draw() {
+    ctx.fillStyle = "#05060a";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    const reveal = debugState.revealAll;
+    for (let y = 0; y < game.h; y++) {
+      for (let x = 0; x < game.w; x++) {
+        const i = idx(x, y);
+        const lit = reveal || game.visible[i];
+        const known = lit || game.seen[i];
+        if (!known) continue; // unknown -> stays black
+        const t = game.tiles[i];
+        ctx.fillStyle = (lit ? PALETTE.lit : PALETTE.dim)[t];
+        ctx.fillRect(x * CELL, y * CELL, CELL - 1, CELL - 1);
+        if (t === TILE.STAIRS) {
+          ctx.fillStyle = lit ? "#8be9fd" : "#3a5560"; // terrain glyph shows in memory
+          ctx.font = "bold 13px ui-monospace, monospace";
+          ctx.textAlign = "center"; ctx.textBaseline = "middle";
+          ctx.fillText(">", x * CELL + CELL / 2, y * CELL + CELL / 2 + 1);
+        }
+      }
+    }
+    // Debug flow-field overlay: the numeric distance-to-player on each known
+    // tile. Watch the numbers descend toward the player.
+    if (DEBUG && debugState.flow && game.flow) {
+      ctx.font = "8px monospace";
+      ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      for (let y = 0; y < game.h; y++) {
+        for (let x = 0; x < game.w; x++) {
+          const i = idx(x, y);
+          if (!(reveal || game.visible[i] || game.seen[i])) continue;
+          const v = game.flow[i];
+          if (v === RL.UNREACHABLE || v < 0) continue;
+          ctx.fillStyle = "rgba(120,200,255," + Math.max(0.15, 1 - v / 40) + ")";
+          ctx.fillText(v, x * CELL + CELL / 2, y * CELL + CELL / 2);
+        }
+      }
+    }
+
+    // Items — only where currently visible.
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    for (const it of game.items) {
+      const i = idx(it.x, it.y);
+      if (!(reveal || game.visible[i])) continue;
+      const d = RL.ITEM_DEFS[it.defId];
+      ctx.fillStyle = d.color;
+      ctx.font = "bold 13px ui-monospace, monospace";
+      ctx.fillText(d.glyph, it.x * CELL + CELL / 2, it.y * CELL + CELL / 2 + 1);
+    }
+
+    // Enemies — only where currently visible (never drawn from memory).
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    for (const e of game.enemies) {
+      if (!e.alive) continue;
+      const i = idx(e.x, e.y);
+      if (!(reveal || game.visible[i])) continue;
+      const t = RL.ENEMY_TYPES[e.typeId];
+      ctx.fillStyle = t.color;
+      ctx.font = "bold 14px ui-monospace, monospace";
+      ctx.fillText(t.glyph, e.x * CELL + CELL / 2, e.y * CELL + CELL / 2 + 1);
+      if (DEBUG) {
+        ctx.fillStyle = STATE_COLOR[e.state] || "#8899aa";
+        ctx.font = "7px monospace";
+        ctx.fillText(e.state, e.x * CELL + CELL / 2, e.y * CELL - 2);
+      }
+    }
+
+    // Player (always drawn; it's the observer and always visible).
+    const p = game.player;
+    ctx.fillStyle = "#ffd36b";
+    ctx.fillRect(p.x * CELL + 2, p.y * CELL + 2, CELL - 5, CELL - 5);
+    if (DEBUG) {
+      ctx.fillStyle = "#4a5568";
+      ctx.font = "10px monospace";
+      ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+      ctx.fillText(`turn ${game.turn}`, 4, 12);
+    }
+  }
+  const STATE_COLOR = { idle: "#5a6472", alerted: "#ffd36b", hunting: "#ff6b6b", searching: "#c58bff" };
+
+  function onStairs() { return tileAt(game, game.player.x, game.player.y) === TILE.STAIRS; }
+
+  // Input: one keydown = one turn. Held keys don't queue (keydown repeat is
+  // ignored via a resolving flag), matching the "no sub-turn input queue" rule.
+  const KEYMAP = {
+    ArrowUp: [0,-1], ArrowDown: [0,1], ArrowLeft: [-1,0], ArrowRight: [1,0],
+    w: [0,-1], s: [0,1], a: [-1,0], d: [1,0],
+    k: [0,-1], j: [0,1], h: [-1,0], l: [1,0],
+    y: [-1,-1], u: [1,-1], b: [-1,1], n: [1,1],
+    " ": [0,0], ".": [0,0],
+  };
+  let resolving = false;
+  window.addEventListener("keydown", (e) => {
+    if (resolving) return;
+    if (game.gameOver) return; // dead: ignore gameplay keys until New run
+    const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+    resolving = true;
+    try {
+      // Descend on the stairs with '>'.
+      if (key === ">" && onStairs()) {
+        e.preventDefault();
+        game = descend(game);
+        RL.advanceGame(game);
+        document.getElementById("depthShow").textContent = game.depth;
+        pushAndRender("You descend to depth " + game.depth + ".");
+        return;
+      }
+      // Use inventory slot 1-8.
+      if (key >= "1" && key <= "8") {
+        e.preventDefault();
+        if (usePlayerItem(game, parseInt(key, 10) - 1)) renderAll();
+        return;
+      }
+      // Pick up.
+      if (key === "g") { e.preventDefault(); playerPickup(game); renderAll(); return; }
+
+      const mv = KEYMAP[key];
+      if (!mv) return;
+      e.preventDefault();
+      const acted = playerMove(game, mv[0], mv[1]); // move / attack / wait; enemies then act
+      if (!acted && (mv[0] || mv[1])) log("Blocked.");
+      else if (onStairs() && !game.gameOver) log("Stairs down. Press > to descend.");
+      renderAll();
+    } finally {
+      // No animation yet; unlock immediately. (Milestone 7 adds interpolation.)
+      resolving = false;
+    }
+  });
+  function renderAll() { draw(); renderSide(); }
+  function pushAndRender(msg) { game.messages.push(msg); renderAll(); }
+
+  document.getElementById("seedGo").onclick = () => {
+    const v = document.getElementById("seedInput").value.trim();
+    newRun(v || pickSeed());
+  };
+  document.getElementById("seedInput").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") document.getElementById("seedGo").click();
+  });
+
+  // Boot.
+  if (params.get("test") === "1") {
+    const r = runTests();
+    document.title = "Roguelike — " + (r.fail === 0 ? "TESTS PASS" : "TESTS FAIL");
+  }
+  newRun(pickSeed());
+  if (DEBUG) document.getElementById("debugPanel").textContent = "enabled";
+}
+
+})();
+</script>
