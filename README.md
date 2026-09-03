@@ -47,3 +47,4 @@ no dependencies, no assets — one self-contained file. Everything is drawn proc
 |------|---------|
 | `roguelike.html` | The game. The whole deliverable. |
 | `test-node.js` | Headless test runner (tooling, not shipped in the page). |
+| `SPEC.md` | The original build spec, annotated with implementation status. |
