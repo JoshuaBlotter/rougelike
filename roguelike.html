@@ -79,10 +79,14 @@
 
   /* touch controls — shown on coarse pointers / small screens only. The center
      button is a context-aware Interact: pick up / descend / wait, self-labelling. */
-  #touch { display: none; margin-top: 10px; align-items: center; justify-content: center; user-select: none; }
+  #touch { display: none; margin-top: 10px; align-items: center; justify-content: center;
+      user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
   #dpad { display: grid; grid-template-columns: repeat(3, 46px); grid-template-rows: repeat(3, 46px); gap: 4px; }
+  /* touch-action:none + callout:none so a HELD button repeats a move instead of
+     triggering iOS's long-press selection / magnifier / context menu. */
   #dpad button { font: 15px/1 ui-monospace, monospace; padding: 0; height: 46px; cursor: pointer;
-      background: #161c28; border: 1px solid #2a3346; border-radius: 6px; color: #c8d0dc; touch-action: manipulation; }
+      background: #161c28; border: 1px solid #2a3346; border-radius: 6px; color: #c8d0dc;
+      touch-action: none; -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
   #dpad button:active { background: #2a3346; }
   #interactBtn { font-weight: bold; }
   #interactBtn[data-mode="wait"] { color: #6b7688; }                        /* nothing here — just wait */
@@ -170,6 +174,7 @@
       interacts — pick up / descend / wait, depending where you stand.<br>
       Phone: use Share → <b>Add to Home Screen</b> to play fullscreen.<br>
       Share a run: append <code>?seed=</code> to the URL.
+      <div id="verTag" style="margin-top:8px; opacity:.45; font-size:11px"></div>
     </div>
   </div>
 </div>
@@ -1864,6 +1869,10 @@ if (typeof document !== "undefined") {
   const params = new URLSearchParams(location.search);
   const DEBUG = params.get("debug") === "1";
 
+  // Bump this on every deploy — shown de-emphasised in the help panel so you can
+  // confirm the home-screen app actually reloaded the latest build.
+  const APP_VERSION = "build 9 · 2026-09-03";
+
   let game;
   const debugState = { revealAll: false, flow: false };
 
@@ -2289,11 +2298,29 @@ if (typeof document !== "undefined") {
     else if (onStairs())                              { b.dataset.mode = "down"; b.textContent = "↓"; }
     else                                              { b.dataset.mode = "wait"; b.textContent = "•"; }
   }
-  document.getElementById("dpad").addEventListener("click", (e) => {
+  // Pointer-based dpad: a direction fires once on press and then auto-repeats
+  // while held (like holding an arrow key); the center Interact is a single tap.
+  // Using pointer events + preventDefault also stops iOS's long-press callout.
+  const HOLD_REPEAT_MS = 150;
+  let holdTimer = null;
+  function stopHold() { if (holdTimer) { clearInterval(holdTimer); holdTimer = null; } }
+  document.getElementById("dpad").addEventListener("pointerdown", (e) => {
     const b = e.target.closest("button"); if (!b) return;
+    e.preventDefault();
     const dx = parseInt(b.dataset.dx, 10), dy = parseInt(b.dataset.dy, 10);
-    if (dx === 0 && dy === 0) doInteract(); else doMove(dx, dy);
+    if (dx === 0 && dy === 0) { doInteract(); return; } // center: one action, no repeat
+    doMove(dx, dy);                                      // immediate first step
+    stopHold();
+    holdTimer = setInterval(() => {
+      if (!game || game.gameOver) { stopHold(); return; }
+      doMove(dx, dy);
+    }, HOLD_REPEAT_MS);
+    if (b.setPointerCapture) try { b.setPointerCapture(e.pointerId); } catch (_) {}
   });
+  // Release anywhere ends the repeat.
+  window.addEventListener("pointerup", stopHold);
+  window.addEventListener("pointercancel", stopHold);
+  window.addEventListener("blur", stopHold);
   // Tap an inventory slot to use it (delegated: survives innerHTML rewrites).
   document.getElementById("inv").addEventListener("click", (e) => {
     const s = e.target.closest(".slot"); if (!s || s.dataset.slot == null) return;
@@ -2317,6 +2344,7 @@ if (typeof document !== "undefined") {
     document.title = "Roguelike — " + (r.fail === 0 ? "TESTS PASS" : "TESTS FAIL");
   }
   newRun(pickSeed());
+  document.getElementById("verTag").textContent = APP_VERSION;
   if (DEBUG) document.getElementById("debugPanel").textContent = "enabled";
 }
 
