@@ -16,9 +16,12 @@
   corner rule, seeded PRNG with split streams, debug scaffolding, determinism tests.
 -->
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Seeded Roguelike</title>
 <style>
-  html, body { margin: 0; background: #0b0d11; color: #c8d0dc; font: 14px/1.4 ui-monospace, Menlo, Consolas, monospace; }
+  html, body { margin: 0; background: #0b0d11; color: #c8d0dc; font: 14px/1.4 ui-monospace, Menlo, Consolas, monospace;
+    -webkit-text-size-adjust: 100%; text-size-adjust: 100%; overscroll-behavior: none; }
+  * { -webkit-tap-highlight-color: transparent; } /* no grey flash on tap (iOS) */
   #wrap { display: flex; gap: 16px; padding: 16px; align-items: flex-start; flex-wrap: wrap; }
   canvas { background: #05060a; image-rendering: pixelated; border: 1px solid #1c2230; }
   #side { width: 320px; }
@@ -66,40 +69,76 @@
   #touch { display: none; margin-top: 10px; gap: 18px; align-items: center; justify-content: center; user-select: none; }
   #dpad { display: grid; grid-template-columns: repeat(3, 46px); grid-template-rows: repeat(3, 46px); gap: 4px; }
   #dpad button, #acts button { font: 15px/1 ui-monospace, monospace; padding: 0; height: 46px; cursor: pointer;
-      background: #161c28; border: 1px solid #2a3346; border-radius: 6px; color: #c8d0dc; }
+      background: #161c28; border: 1px solid #2a3346; border-radius: 6px; color: #c8d0dc; touch-action: manipulation; }
   #dpad button:active, #acts button:active { background: #2a3346; }
   #dpad .wait { color: #6b7688; }
   #acts { display: grid; grid-auto-flow: row; gap: 4px; }
   #acts button { width: 72px; }
-  @media (pointer: coarse), (max-width: 780px) { #touch { display: flex; } }
   #soundBtn { flex: 0 0 auto; cursor: pointer; }
+
+  /* -------- Mobile / touch layout: one thumb-friendly column -------- */
+  @media (pointer: coarse), (max-width: 780px) {
+    #touch { display: flex; }
+    #wrap { flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: 8px;
+      padding: 8px max(8px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left)); }
+    /* #side dissolves so its panels become direct flex items we can reorder */
+    #side { display: contents; }
+    #side h1 { display: none; }              /* reclaim vertical space on small screens */
+    /* explicit vertical order: status, map, controls, log, inventory, then setup */
+    #hud       { order: 1; margin: 0; }
+    #stage     { order: 2; align-self: center; }
+    #touch     { order: 3; margin: 6px 0; }
+    #msglog    { order: 4; margin: 0; min-height: 0; }
+    #inv       { order: 5; margin: 0; }
+    #seedPanel { order: 6; margin: 0; }
+    #helpPanel { order: 7; margin: 0; }
+    #debugWrap { order: 8; margin: 0; }
+    /* square canvas that fits either orientation and always leaves room for controls */
+    #stage, #game { width: min(100%, 78vh); }
+    /* bigger, thumb-sized control targets */
+    #dpad { grid-template-columns: repeat(3, 56px); grid-template-rows: repeat(3, 56px); gap: 6px; }
+    #dpad button, #acts button { height: 56px; font-size: 18px; }
+    #acts { gap: 6px; }
+    #acts button { width: 84px; height: auto; min-height: 56px; }
+    #seedInput { font-size: 16px; }          /* >=16px stops iOS auto-zoom on focus */
+  }
+
+  /* Landscape phone: map and controls share a row so both stay on-screen. */
+  @media (pointer: coarse) and (orientation: landscape) and (max-height: 500px) {
+    #wrap { flex-flow: row wrap; align-items: flex-start; }
+    #hud       { flex: 1 1 100%; }                 /* HP across the top */
+    #stage     { flex: 0 0 auto; align-self: flex-start; }
+    #stage, #game { width: min(52vw, 82vh); }
+    #touch     { flex: 0 0 auto; margin: 0 0 0 12px; }
+    #msglog, #inv, #seedPanel, #helpPanel, #debugWrap { flex: 1 1 100%; }
+  }
 </style>
 
 <div id="wrap">
   <div id="stage">
     <canvas id="game" width="704" height="704"></canvas>
     <div id="overlay"><div class="card" id="overlayCard"></div></div>
-    <div id="touch">
-      <div id="dpad">
-        <button data-dx="-1" data-dy="-1">↖</button>
-        <button data-dx="0"  data-dy="-1">↑</button>
-        <button data-dx="1"  data-dy="-1">↗</button>
-        <button data-dx="-1" data-dy="0">←</button>
-        <button data-dx="0"  data-dy="0" class="wait">•</button>
-        <button data-dx="1"  data-dy="0">→</button>
-        <button data-dx="-1" data-dy="1">↙</button>
-        <button data-dx="0"  data-dy="1">↓</button>
-        <button data-dx="1"  data-dy="1">↘</button>
-      </div>
-      <div id="acts">
-        <button data-act="pickup">get</button>
-        <button data-act="descend">&gt; down</button>
-      </div>
+  </div>
+  <div id="touch">
+    <div id="dpad">
+      <button data-dx="-1" data-dy="-1">↖</button>
+      <button data-dx="0"  data-dy="-1">↑</button>
+      <button data-dx="1"  data-dy="-1">↗</button>
+      <button data-dx="-1" data-dy="0">←</button>
+      <button data-dx="0"  data-dy="0" class="wait">•</button>
+      <button data-dx="1"  data-dy="0">→</button>
+      <button data-dx="-1" data-dy="1">↙</button>
+      <button data-dx="0"  data-dy="1">↓</button>
+      <button data-dx="1"  data-dy="1">↘</button>
+    </div>
+    <div id="acts">
+      <button data-act="pickup">get</button>
+      <button data-act="descend">&gt; down</button>
     </div>
   </div>
   <div id="side">
     <h1>SEEDED ROGUELIKE</h1>
-    <div class="panel">
+    <div class="panel" id="seedPanel">
       <div class="muted">seed</div>
       <div class="row"><input id="seedInput" spellcheck="false"><button id="seedGo">New run</button><button id="soundBtn" title="toggle sound">🔊</button></div>
       <div class="muted">Current: <code id="seedShow">—</code> · depth <span id="depthShow">1</span></div>
@@ -107,11 +146,11 @@
     <div class="panel" id="hud"></div>
     <div class="panel" id="inv"></div>
     <div class="panel" id="msglog"></div>
-    <div class="panel">
+    <div class="panel" id="debugWrap">
       <div class="muted" style="margin-bottom:6px">Debug (?debug=1)</div>
       <div id="debugPanel" class="muted">disabled</div>
     </div>
-    <div class="panel muted" style="font-size:12px">
+    <div class="panel muted" id="helpPanel" style="font-size:12px">
       Move: arrows / WASD / hjkl+yubn · wait: space or .<br>
       Pick up: g · use item: 1–8 (or tap a slot) · descend: &gt;<br>
       Touch: on-screen pad appears on tablets/phones.<br>
