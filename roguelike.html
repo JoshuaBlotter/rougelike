@@ -1871,7 +1871,7 @@ if (typeof document !== "undefined") {
 
   // Bump this on every deploy — shown de-emphasised in the help panel so you can
   // confirm the home-screen app actually reloaded the latest build.
-  const APP_VERSION = "build 9 · 2026-09-03";
+  const APP_VERSION = "build 10 · 2026-09-03";
 
   let game;
   const debugState = { revealAll: false, flow: false };
@@ -2345,7 +2345,9 @@ if (typeof document !== "undefined") {
   }
   newRun(pickSeed());
   document.getElementById("verTag").textContent = APP_VERSION;
+  // The debug panel (and its ?debug=1 hint) only exists when debug mode is on.
   if (DEBUG) document.getElementById("debugPanel").textContent = "enabled";
+  else document.getElementById("debugWrap").hidden = true;
 }
 
 })();
