@@ -5,6 +5,11 @@ same dungeon, same loot, same enemy placements — on any machine. Different see
 neither of us has seen before. Enemies hunt intelligently around corners rather than
 walking into walls.
 
+**Beat the dungeon:** a **12-floor campaign** with a **boss every 4 floors** (Ogre → Shade →
+Lich). Clear the final boss to win — then **Continue into Endless mode**, where the dungeon
+keeps escalating and the only score is how deep you get. Since a run is fixed by its seed,
+"can you clear *this* seed?" is a shareable challenge.
+
 **Play it online:** <https://joshuablotter.github.io/rougelike/>
 
 **Or run it locally:** open [`roguelike.html`](roguelike.html) in any browser. No build, no
@@ -36,8 +41,11 @@ server, no dependencies, no assets — one self-contained file. Everything is dr
   leaking through wall corners), with three visibility states (visible / remembered / unknown).
 - **Flow-field (Dijkstra map) pathfinding** with an `idle → alerted → hunting → searching`
   state machine — enemies chase your *last-known position* around corners and can be wrong.
-- **Energy-based turns** for speed variety, six orthogonal item effects, and six enemy
-  archetypes on a tuned difficulty curve.
+- **Energy-based turns** for speed variety, six orthogonal item effects, six enemy
+  archetypes plus three bosses, on a tuned difficulty curve.
+- **A campaign with a finish line.** Twelve floors, bosses at 4/8/12, a win screen, then an
+  optional endless mode. Enemy HP/damage/count scale (on separate curves) while the player's
+  power is capped, so late floors actually threaten a geared-up hero instead of melting.
 - **Cosmetic-only juice** layered strictly on top of the resolved sim: smooth movement
   interpolation, screen shake, hit flashes, a damage vignette, and synthesised Web Audio
   blips — none of it ever writes back into game state, so determinism is untouched.

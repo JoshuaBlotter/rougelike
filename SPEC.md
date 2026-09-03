@@ -74,6 +74,18 @@ single static file directly).
 - **Locked doors / keys not implemented** — the softlock-avoidance section is written
   conditionally ("if you add locked doors"); none were added, so that check is a documented
   no-op rather than a faked pass.
+- **Post-M7: turned the endless staircase into a campaign + endless mode.** Playtesting
+  showed the original "descend forever" had no goal and the player snowballed (attack far
+  outran enemy damage, count was hard-capped at 8, and depth 11 actually *crashed* because
+  all items had `depthMax: 10`). Reworked into a **12-floor campaign** (`FINAL_DEPTH`) with a
+  **boss every 4 floors** (Ogre/Shade/Lich, placed guarding the stairs with a small escort),
+  a **win state** on clearing depth 12, and an **endless mode** afterward (bosses every 5,
+  uncapped scaling, score = depth). Rebalanced so the curves reconverge: steeper enemy
+  HP/damage/count, a cap on the strength-shard attack bonus (`MAX_ATTACK_BONUS`), gentler
+  max-HP growth, and a between-floor checkpoint heal (replacing passive-regen-to-full). Items
+  now spawn at any depth (fixes the crash). The competent-bot balance harness was re-tuned
+  against the new curve; a full clear demands real skill (the bot reaches the final boss but
+  rarely wins), which is the intended difficulty.
 - **M7 juice is a strictly render-only effects layer.** Movement interpolation, screen shake,
   hit flashes, and the damage vignette are all derived from a before/after *diff* taken around
   each action in `act()` — no new fields are added to the sim, and nothing animation-side is

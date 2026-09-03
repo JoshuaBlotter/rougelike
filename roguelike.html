@@ -66,6 +66,7 @@
   .card { background: #10141c; border: 1px solid #2a3346; border-radius: 8px; padding: 18px 22px;
           text-align: center; box-shadow: 0 8px 40px rgba(0,0,0,.55); max-width: 88%; }
   .card h2 { margin: 0 0 2px; font-size: 22px; letter-spacing: 3px; color: #ff6b6b; }
+  .card h2.win { color: #8ef0a0; } /* victory, not death */
   .card .sub { color: #6b7688; margin-bottom: 12px; }
   .card table { margin: 0 auto 14px; border-collapse: collapse; font-size: 13px; }
   .card td { padding: 2px 10px; }
@@ -306,29 +307,56 @@ const GEN = {
 // by depth, so deeper floors force a longer traverse.
 function requiredStairDist(depth) { return 8 + Math.floor(depth * 1.5); }
 
+// Campaign shape. The game is a finite descent of FINAL_DEPTH floors with a boss
+// every BOSS_EVERY floors (so 4, 8, 12); clearing depth 12 wins the run. After
+// that it opens into ENDLESS mode — keep descending, difficulty scales without a
+// cap, a boss every 5 floors, score = deepest floor reached.
+const FINAL_DEPTH = 12;
+const BOSS_EVERY = 4;              // campaign boss floors: 4, 8, 12
+const ENDLESS_BOSS_EVERY = 5;      // endless boss floors: 17, 22, 27, ...
+function isBossFloor(depth) {
+  if (depth <= FINAL_DEPTH) return depth % BOSS_EVERY === 0;
+  return (depth - FINAL_DEPTH) % ENDLESS_BOSS_EVERY === 0;
+}
+// Which boss guards a given boss floor. The campaign has three set bosses; endless
+// cycles them (scaled up by depth in makeEnemy).
+function bossForDepth(depth) {
+  if (depth === 4) return "ogre";
+  if (depth === 8) return "shade";
+  if (depth === 12) return "lich";
+  const seq = ["ogre", "shade", "lich"];
+  const n = Math.floor((depth - FINAL_DEPTH) / ENDLESS_BOSS_EVERY); // 17->1, 22->2, ...
+  return seq[(Math.max(1, n) - 1) % seq.length];
+}
+
 // Enemy archetypes. Data-driven: adding a monster is adding one entry here.
 // `behavior` selects the AI: melee (close and hit), ranged (kite at distance),
 // flee (run; only fights when cornered). `debut` is the depth the archetype is
-// introduced ALONE; `weight` drives the mix on later floors. hp/damage here are
-// depth-1 bases; enemyHpScale/enemyDmgScale grow them on separate curves.
+// introduced ALONE (kept off boss floors); `weight` drives the mix on later
+// floors. hp/damage here are depth-1 bases; enemyHpScale/enemyDmgScale grow them.
+// `boss: true` types are never in the random pool — they're placed on boss floors.
 const ENEMY_TYPES = {
   grunt:  { id: "grunt",  name: "Grunt",  glyph: "g", color: "#ff6b6b", hp: 6,  damage: 2, speed: 100, sight: 8, behavior: "melee",  debut: 1, weight: 10, threat: 1 },
   hound:  { id: "hound",  name: "Hound",  glyph: "h", color: "#ffa94d", hp: 4,  damage: 2, speed: 165, sight: 9, behavior: "melee",  debut: 2, weight: 9,  threat: 1.5 },
   brute:  { id: "brute",  name: "Brute",  glyph: "B", color: "#c92a2a", hp: 15, damage: 4, speed: 65,  sight: 7, behavior: "melee",  debut: 3, weight: 6,  threat: 3 },
-  archer: { id: "archer", name: "Archer", glyph: "a", color: "#63e6be", hp: 6,  damage: 3, speed: 100, sight: 9, behavior: "ranged", debut: 4, weight: 6,  threat: 2.5, rangeMin: 3, rangeMax: 6 },
-  imp:    { id: "imp",    name: "Imp",    glyph: "i", color: "#da77f2", hp: 5,  damage: 2, speed: 120, sight: 9, behavior: "flee",   debut: 5, weight: 6,  threat: 1 },
-  warden: { id: "warden", name: "Warden", glyph: "W", color: "#f783ac", hp: 20, damage: 6, speed: 95,  sight: 9, behavior: "melee",  debut: 7, weight: 4,  threat: 5 },
+  archer: { id: "archer", name: "Archer", glyph: "a", color: "#63e6be", hp: 6,  damage: 3, speed: 100, sight: 9, behavior: "ranged", debut: 5, weight: 6,  threat: 2.5, rangeMin: 3, rangeMax: 6 },
+  imp:    { id: "imp",    name: "Imp",    glyph: "i", color: "#da77f2", hp: 5,  damage: 2, speed: 120, sight: 9, behavior: "flee",   debut: 6, weight: 6,  threat: 1 },
+  warden: { id: "warden", name: "Warden", glyph: "W", color: "#f783ac", hp: 20, damage: 6, speed: 95,  sight: 9, behavior: "melee",  debut: 9, weight: 4,  threat: 5 },
+  // Bosses (placed on boss floors, not in the random pool). Tuned at their home
+  // depth; in endless they scale up via makeEnemy.
+  ogre:   { id: "ogre",   name: "Ogre",   glyph: "O", color: "#ffd43b", hp: 26,  damage: 5,  speed: 85,  sight: 11, behavior: "melee",  boss: true, debut: 999, weight: 0, threat: 0 },
+  shade:  { id: "shade",  name: "Shade",  glyph: "S", color: "#9775fa", hp: 46,  damage: 8,  speed: 115, sight: 12, behavior: "melee",  boss: true, debut: 999, weight: 0, threat: 0 },
+  lich:   { id: "lich",   name: "Lich",   glyph: "L", color: "#e599f7", hp: 84,  damage: 10, speed: 100, sight: 13, behavior: "ranged", boss: true, debut: 999, weight: 0, threat: 0, rangeMin: 3, rangeMax: 7 },
 };
 
 // Difficulty curves — deliberately DIFFERENT slopes so a deep floor isn't a
-// shallow floor with bigger numbers. HP climbs fastest, damage slower. Instead
-// of a raw enemy count, floors fill to a THREAT budget (each archetype costs
-// its `threat`), so dangerous types are naturally rare and a floor never becomes
-// a mosh pit of brutes. A hard count cap (by area) still applies.
-function enemyHpScale(depth)  { return 1 + 0.085 * (depth - 1); }
-function enemyDmgScale(depth) { return 1 + 0.05 * (depth - 1); }
-function threatBudget(depth)  { return 3 + 1.3 * (depth - 1); }
-function enemyCountCap(depth, area) { return Math.max(1, Math.min(2 + Math.floor(depth * 0.7), Math.floor(area / 70), 8)); }
+// shallow floor with bigger numbers. Steepened for the campaign so late floors
+// actually threaten a geared-up player: HP climbs fastest, damage close behind,
+// the threat budget fills floors denser, and the hard count cap rises with depth.
+function enemyHpScale(depth)  { return 1 + 0.11 * (depth - 1); }
+function enemyDmgScale(depth) { return 1 + 0.065 * (depth - 1); }
+function threatBudget(depth)  { return 3 + 1.25 * (depth - 1); }
+function enemyCountCap(depth, area) { return Math.max(1, Math.min(2 + Math.floor(depth * 0.7), Math.floor(area / 62), 11)); }
 
 // AI tuning.
 const UNREACHABLE = -1;      // flow-field sentinel for cells the flood can't reach
@@ -341,6 +369,7 @@ const OSC_REVERSE_PENALTY = 1; // tie-break weight against immediately reversing
 const ACTION_COST = 100;     // energy one action costs; speed is energy gained per tick
 const PLAYER_HP = 30, PLAYER_SPEED = 100, PLAYER_ATTACK = 4;
 const INV_CAP = 8;           // inventory slot cap — scarcity is where the decisions live
+const MAX_ATTACK_BONUS = 6;  // cap on cumulative strength-shard bonus — stops the attack snowball
 const REGEN_PER_TURN = 3;    // heal from a regen-tonic buff, per player turn
 const PASSIVE_REGEN_INTERVAL = 8;    // player heals 1 HP every this-many turns (sustain vs. attrition)
 const PASSIVE_REGEN_CAP_FRAC = 0.5;  // ...but only up to this fraction of maxHp — passive regen recovers
@@ -350,14 +379,14 @@ const PASSIVE_REGEN_CAP_FRAC = 0.5;  // ...but only up to this fraction of maxHp
 // orthogonal (heal / weapon / upgrade / blink / area / regen) so combinations
 // stay interesting. `kind` consumable stacks; weapon/upgrade take a slot each.
 const ITEM_DEFS = {
-  healing_potion: { name: "Healing Potion", glyph: "!", color: "#5ad469", tier: 1, weight: 30, depthMin: 1, depthMax: 10, kind: "consumable", effect: { type: "heal", amount: 12 } },
-  strong_potion:  { name: "Strong Potion",  glyph: "!", color: "#8ef0a0", tier: 2, weight: 10, depthMin: 3, depthMax: 10, kind: "consumable", effect: { type: "heal", amount: 24 } },
-  sword:          { name: "Worn Weapon",    glyph: "/", color: "#cfd6e4", tier: 1, weight: 12, depthMin: 1, depthMax: 6,  kind: "weapon",     effect: { type: "weapon", tierMin: 0 } },
-  greataxe:       { name: "Fine Weapon",     glyph: "/", color: "#ffd36b", tier: 3, weight: 8,  depthMin: 4, depthMax: 10, kind: "weapon",     effect: { type: "weapon", tierMin: 3 } },
-  strength_shard: { name: "Strength Shard", glyph: "*", color: "#ff9f43", tier: 2, weight: 8,  depthMin: 1, depthMax: 10, kind: "upgrade",    effect: { type: "strength", amount: 1 } },
-  blink_scroll:   { name: "Blink Scroll",   glyph: "?", color: "#8be9fd", tier: 2, weight: 12, depthMin: 2, depthMax: 10, kind: "consumable", effect: { type: "blink", range: 6 } },
-  firebomb:       { name: "Firebomb",       glyph: "o", color: "#ff6b6b", tier: 2, weight: 12, depthMin: 2, depthMax: 10, kind: "consumable", effect: { type: "area", radius: 2, damage: 8 } },
-  regen_tonic:    { name: "Regen Tonic",    glyph: "+", color: "#c58bff", tier: 2, weight: 10, depthMin: 3, depthMax: 10, kind: "consumable", effect: { type: "regen", turns: 6 } },
+  healing_potion: { name: "Healing Potion", glyph: "!", color: "#5ad469", tier: 1, weight: 30, depthMin: 1, depthMax: 99, kind: "consumable", effect: { type: "heal", amount: 12 } },
+  strong_potion:  { name: "Strong Potion",  glyph: "!", color: "#8ef0a0", tier: 2, weight: 10, depthMin: 3, depthMax: 99, kind: "consumable", effect: { type: "heal", amount: 24 } },
+  sword:          { name: "Worn Weapon",    glyph: "/", color: "#cfd6e4", tier: 1, weight: 12, depthMin: 1, depthMax: 99,  kind: "weapon",     effect: { type: "weapon", tierMin: 0 } },
+  greataxe:       { name: "Fine Weapon",     glyph: "/", color: "#ffd36b", tier: 3, weight: 8,  depthMin: 4, depthMax: 99, kind: "weapon",     effect: { type: "weapon", tierMin: 3 } },
+  strength_shard: { name: "Strength Shard", glyph: "*", color: "#ff9f43", tier: 2, weight: 8,  depthMin: 1, depthMax: 99, kind: "upgrade",    effect: { type: "strength", amount: 1 } },
+  blink_scroll:   { name: "Blink Scroll",   glyph: "?", color: "#8be9fd", tier: 2, weight: 12, depthMin: 2, depthMax: 99, kind: "consumable", effect: { type: "blink", range: 6 } },
+  firebomb:       { name: "Firebomb",       glyph: "o", color: "#ff6b6b", tier: 2, weight: 12, depthMin: 2, depthMax: 99, kind: "consumable", effect: { type: "area", radius: 2, damage: 8 } },
+  regen_tonic:    { name: "Regen Tonic",    glyph: "+", color: "#c58bff", tier: 2, weight: 10, depthMin: 3, depthMax: 99, kind: "consumable", effect: { type: "regen", turns: 6 } },
 };
 function isHealItem(defId) { return ITEM_DEFS[defId].effect.type === "heal"; }
 function isWeaponOrUpgrade(defId) { const k = ITEM_DEFS[defId].kind; return k === "weapon" || k === "upgrade"; }
@@ -486,8 +515,16 @@ function bfsDistance(tiles, starts) {
 
 function makeEnemy(id, x, y, typeId, depth = 1) {
   const t = ENEMY_TYPES[typeId];
-  const hp = Math.max(1, Math.round(t.hp * enemyHpScale(depth)));
-  const damage = Math.max(1, Math.round(t.damage * enemyDmgScale(depth)));
+  // Bosses are tuned at their home depth, so they don't ride the per-floor scale;
+  // in endless (past FINAL_DEPTH) they grow on their own gentler curve instead.
+  let hpMul = enemyHpScale(depth), dmgMul = enemyDmgScale(depth);
+  if (t.boss) {
+    const over = Math.max(0, depth - FINAL_DEPTH);
+    hpMul = 1 + 0.14 * over;
+    dmgMul = 1 + 0.09 * over;
+  }
+  const hp = Math.max(1, Math.round(t.hp * hpMul));
+  const damage = Math.max(1, Math.round(t.damage * dmgMul));
   return {
     id, x, y, prevX: x, prevY: y, typeId, hp, maxHp: hp, damage, alive: true,
     state: "idle", lastKnown: null, searchTurns: 0,
@@ -521,6 +558,24 @@ function placeEnemies(rng, tiles, rooms, spawnRoom, spawn, distFromSpawn, depth)
   cands.sort((a, b) => a - b);                       // stable order before the seeded shuffle
   rng.shuffle(cands);
 
+  // Boss floor: one boss guarding the deep end (farthest reachable tile from
+  // spawn, i.e. by the stairs) plus a small grunt escort. No threat-budget mob.
+  if (isBossFloor(depth)) {
+    let bi = -1, bd = -1;
+    for (const i of cands) if (distFromSpawn[i] > bd) { bd = distFromSpawn[i]; bi = i; }
+    const out = [];
+    if (bi >= 0) {
+      out.push(makeEnemy(0, bi % MAP_W, (bi / MAP_W) | 0, bossForDepth(depth), depth));
+      const escort = Math.min(1 + Math.floor(depth / 6), 3);
+      for (let k = 0, placed = 0; k < cands.length && placed < escort; k++) {
+        if (cands[k] === bi) continue;
+        out.push(makeEnemy(placed + 1, cands[k] % MAP_W, (cands[k] / MAP_W) | 0, "grunt", depth));
+        placed++;
+      }
+    }
+    return out;
+  }
+
   // Choose the roster by spending a THREAT budget. On the depth an archetype
   // debuts, you meet it among plain grunts (the newcomer reads clearly without a
   // swarm of itself); other floors draw from the full unlocked roster.
@@ -528,10 +583,11 @@ function placeEnemies(rng, tiles, rooms, spawnRoom, spawn, distFromSpawn, depth)
   for (let i = 0; i < tiles.length; i++) if (tileWalkable(tiles[i])) area++;
   let cap = Math.min(enemyCountCap(depth, area), cands.length);
   const debuting = Object.keys(ENEMY_TYPES).filter((t) => ENEMY_TYPES[t].debut === depth);
-  // A high-threat newcomer (a boss like the warden) debuts with a small escort so
-  // it reads as the centerpiece, not one face in a mob.
+  // A high-threat newcomer (like the warden) debuts with a small escort so it
+  // reads as the centerpiece, not one face in a mob.
   if (debuting.some((t) => ENEMY_TYPES[t].threat >= 4)) cap = Math.min(cap, 4);
-  const unlocked = Object.keys(ENEMY_TYPES).filter((t) => ENEMY_TYPES[t].debut <= depth);
+  // Regular pool never includes bosses (they only appear on boss floors).
+  const unlocked = Object.keys(ENEMY_TYPES).filter((t) => !ENEMY_TYPES[t].boss && ENEMY_TYPES[t].debut <= depth);
   // On a debut floor: exactly one newcomer (a clean mini-boss intro), the rest
   // plain grunts. Otherwise: the full unlocked roster, weighted.
   const fillPool = debuting.length ? ["grunt"] : unlocked;
@@ -578,7 +634,7 @@ function placeItems(rng, tiles, spawn, stairs, enemies, depth) {
     const i = cands[nextTile++];
     items.push({ iid: iid++, x: i % MAP_W, y: (i / MAP_W) | 0, defId });
   };
-  for (let k = 0; k < count; k++) put(rng.weighted(pool.map((id) => ({ id, weight: ITEM_DEFS[id].weight }))).id);
+  if (pool.length) for (let k = 0; k < count; k++) put(rng.weighted(pool.map((id) => ({ id, weight: ITEM_DEFS[id].weight }))).id);
 
   // Guarantees, placed on fresh tiles so they don't erase rolled variety.
   if (!items.some((it) => isHealItem(it.defId))) put("healing_potion");
@@ -673,6 +729,7 @@ function createGame(seedString, depth = 1) {
     },
     inventory: [],   // [{ defId, count }]
     turn: 0, ticks: 0, kills: 0, itemsFound: 0, gameOver: false, overReason: null,
+    won: false, endless: false,
     messages: [],
     visible: null,
     seen: null,
@@ -694,14 +751,20 @@ function createGame(seedString, depth = 1) {
 function descend(g) {
   const next = createGame(g.seed, g.depth + 1);
   const p = next.player, o = g.player;
-  // Descending grows the player (a second scaling axis to match enemy scaling)
-  // and grants a partial heal — the reward for pressing deeper.
-  p.maxHp = o.maxHp + 3;
-  p.hp = Math.min(p.maxHp, o.hp + 6);
+  // Descending grows the player a little (a second scaling axis) and grants a
+  // partial heal — the reward for pressing deeper. Growth is deliberately gentler
+  // than enemy scaling so late floors close the gap instead of the player pulling
+  // away forever.
+  p.maxHp = o.maxHp + 2;
+  // Reaching a new floor is a checkpoint: heal a chunk, and never arrive below 65%
+  // of max. (Between-floor recovery only — within a floor, real wounds still need a
+  // potion, so this doesn't reintroduce the passive-regen-to-full problem.)
+  p.hp = Math.min(p.maxHp, Math.max(o.hp + 8, Math.floor(p.maxHp * 0.65)));
   p.weaponBonus = o.weaponBonus; p.weaponName = o.weaponName; p.weaponTier = o.weaponTier;
   p.attackBonus = o.attackBonus; p.regen = o.regen; p.energy = 0; p.alive = true;
   next.inventory = g.inventory.map((s) => ({ ...s }));
   next.turn = g.turn; next.kills = g.kills; next.itemsFound = g.itemsFound;
+  next.endless = g.endless;
   next.messages = g.messages;
   updateFOV(next);
   return next;
@@ -1074,7 +1137,9 @@ function applyItem(g, defId) {
       pushMsg(g, `Your weapon becomes a ${w.name} (+${w.bonus}).`); break;
     }
     case "strength":
-      p.attackBonus += ef.amount; pushMsg(g, `Your attacks feel stronger (+${ef.amount}).`); break;
+      if (p.attackBonus >= MAX_ATTACK_BONUS) { pushMsg(g, `You already wield your full strength.`); }
+      else { p.attackBonus = Math.min(MAX_ATTACK_BONUS, p.attackBonus + ef.amount); pushMsg(g, `Your attacks feel stronger (+${ef.amount}).`); }
+      break;
     case "regen":
       p.regen += ef.turns; pushMsg(g, `Warmth spreads — regenerating.`); break;
     case "blink": doBlink(g, ef.range); break;
@@ -1466,7 +1531,7 @@ function competentBot(seed) {
     const p = g.player;
     if (g.tiles[idx(p.x, p.y)] === TILE.STAIRS) {
       closeFloor(false);
-      if (g.depth >= 10) return { records, reached: 10, died: false };
+      if (g.depth >= FINAL_DEPTH) return { records, reached: FINAL_DEPTH, won: true, died: false };
       g = descend(g); advanceGame(g);
       fl = { depth: g.depth, enemies: g.enemies.length, comp: composition(), minHp: g.player.hp };
       continue;
@@ -1475,8 +1540,13 @@ function competentBot(seed) {
     const adj = g.enemies.filter((e) => e.alive && cheby(e) === 1);
     const near = g.enemies.filter((e) => e.alive && cheby(e) <= 3);
 
-    if (p.hp <= Math.floor(p.maxHp * 0.4) && slotOfHeal() >= 0) { usePlayerItem(g, slotOfHeal()); continue; }
-    if (near.length >= 3 && slotOfEffect("area") >= 0) { usePlayerItem(g, slotOfEffect("area")); continue; }
+    // A competent player banks permanent power: strength shards get used on sight.
+    const slotStr = g.inventory.findIndex((s) => ITEM_DEFS[s.defId].effect.type === "strength");
+    if (slotStr >= 0 && !adj.length) { usePlayerItem(g, slotStr); continue; }
+    // Top off before a boss floor's fight rather than walking in wounded.
+    const bossPrep = RL.isBossFloor(g.depth) && p.hp <= Math.floor(p.maxHp * 0.75);
+    if ((p.hp <= Math.floor(p.maxHp * 0.5) || (bossPrep && near.length)) && slotOfHeal() >= 0) { usePlayerItem(g, slotOfHeal()); continue; }
+    if (near.length >= 2 && slotOfEffect("area") >= 0) { usePlayerItem(g, slotOfEffect("area")); continue; }
     if (p.hp <= Math.floor(p.maxHp * 0.35) && adj.length >= 2 && slotOfEffect("blink") >= 0) { usePlayerItem(g, slotOfEffect("blink")); continue; }
     if (adj.length) { adj.sort((a, b) => a.hp - b.hp); const t = adj[0]; playerMove(g, Math.sign(t.x - p.x), Math.sign(t.y - p.y)); continue; }
     if (itemAt(g, p.x, p.y) && playerPickup(g)) continue; // if the pickup is refused, step off the tile instead of looping
@@ -1514,23 +1584,24 @@ function competentBot(seed) {
 // and the clear rate. This is the M6 "where did it feel flat or unfair" report.
 function balanceReport(nSeeds = 40) {
   const byDepth = {};
-  for (let d = 1; d <= 10; d++) byDepth[d] = { floors: 0, endHp: 0, minHp: 0, enemies: 0, deaths: 0, comp: {} };
+  for (let d = 1; d <= FINAL_DEPTH; d++) byDepth[d] = { floors: 0, endHp: 0, minHp: 0, enemies: 0, deaths: 0, comp: {} };
   let cleared = 0; const deathDepths = [];
   for (let s = 0; s < nSeeds; s++) {
     const r = competentBot("bal-" + s);
-    if (r.reached >= 10 && !r.died) cleared++;
+    if (r.reached >= FINAL_DEPTH && !r.died) cleared++;
     if (r.died) deathDepths.push(r.reached);
     for (const rec of r.records) {
       const b = byDepth[rec.depth];
+      if (!b) continue;
       b.floors++; b.endHp += rec.endHpPct; b.minHp += rec.minHpPct; b.enemies += rec.enemies;
       if (rec.died) b.deaths++;
       for (const k in rec.comp) b.comp[k] = (b.comp[k] || 0) + rec.comp[k];
     }
   }
-  let out = `BALANCE REPORT — competent bot, ${nSeeds} seeds, floors 1-10\n`;
-  out += `  clear rate (reached depth 10 alive): ${cleared}/${nSeeds} (${Math.round(100 * cleared / nSeeds)}%)\n`;
+  let out = `BALANCE REPORT — competent bot, ${nSeeds} seeds, floors 1-${FINAL_DEPTH}\n`;
+  out += `  clear rate (cleared depth ${FINAL_DEPTH} alive): ${cleared}/${nSeeds} (${Math.round(100 * cleared / nSeeds)}%)\n`;
   out += `  depth | n  | avg enemies | end HP% | min HP% | deaths | archetype mix\n`;
-  for (let d = 1; d <= 10; d++) {
+  for (let d = 1; d <= FINAL_DEPTH; d++) {
     const b = byDepth[d]; if (!b.floors) continue;
     const mix = Object.keys(b.comp).sort().map((k) => `${k[0]}${Math.round(b.comp[k] / b.floors)}`).join(" ");
     out += `  ${String(d).padStart(5)} | ${String(b.floors).padStart(2)} | ` +
@@ -1697,8 +1768,8 @@ function runTests() {
       let g = createGame("playthrough", 1);
       advanceGame(g);
       let budget = 20000;
-      while (!g.gameOver && g.depth <= 10 && budget-- > 0) {
-        if (g.depth === 10 && g.tiles[idx(g.player.x, g.player.y)] === TILE.STAIRS) break; // reached the bottom
+      while (!g.gameOver && g.depth <= FINAL_DEPTH && budget-- > 0) {
+        if (g.depth >= FINAL_DEPTH && g.tiles[idx(g.player.x, g.player.y)] === TILE.STAIRS) break; // cleared the campaign
         if (g.tiles[idx(g.player.x, g.player.y)] === TILE.STAIRS) { g = descend(g); advanceGame(g); continue; }
         // Emergency heal.
         if (g.player.hp <= 10) {
@@ -1772,6 +1843,7 @@ const API = {
   playerMove, playerPickup, usePlayerItem, itemAt, advanceGame, nextReady, simulateEnergy, attack,
   hashRun, generateReport, balanceReport, competentBot, runTests,
   TILE, DIRS8, DIRS4, MAP_W, MAP_H, idx, requiredStairDist, ENEMY_TYPES, ITEM_DEFS, UNREACHABLE, INV_CAP,
+  FINAL_DEPTH, isBossFloor, bossForDepth,
   setSource(t) { SOURCE_TEXT = t; },
 };
 
@@ -1837,6 +1909,7 @@ if (typeof document !== "undefined") {
     use:     { wave: "triangle", f0: 440, f1: 880, dur: 0.10, vol: 0.09 },
     descend: { wave: "sine",     f0: 150, f1: 330, dur: 0.24, vol: 0.13 },
     death:   { wave: "sawtooth", f0: 220, f1: 40,  dur: 0.70, vol: 0.17 },
+    win:     { wave: "triangle", f0: 523, f1: 1046,dur: 0.55, vol: 0.16 }, // triumphant rising jingle
   };
   function blip(type) {
     if (!audioOn) return;
@@ -1870,8 +1943,8 @@ if (typeof document !== "undefined") {
     RL.advanceGame(game); // fast-forward to the player's first turn
     if (DEBUG) RL.updateFlow(game); // populate the flow cache so the overlay shows pre-move
     resetFx();
-    hideDeath();
-    if (game.gameOver) showDeath();
+    hideEnd();
+    if (game.gameOver) showEnd();
     render();
   }
 
@@ -1898,7 +1971,7 @@ if (typeof document !== "undefined") {
       blip("hurt");
     }
     if (game.itemsFound > prevItems) blip("pickup");
-    if (game.gameOver && !wasOver) { blip("death"); fx.shakeMag = 10; fx.shakeAt = now(); showDeath(); }
+    if (game.gameOver && !wasOver) { blip("death"); fx.shakeMag = 10; fx.shakeAt = now(); showEnd(); }
     render();
     startLoop();
   }
@@ -1907,13 +1980,16 @@ if (typeof document !== "undefined") {
     const p = game.player;
     const pct = Math.max(0, Math.round((p.hp / p.maxHp) * 100));
     // One compact stat line under the HP bar (was two) — saves a row.
+    // Persistent boss badge on boss floors (the log announcement scrolls away).
+    const bossBadge = (!game.gameOver && RL.isBossFloor(game.depth))
+      ? ` · <span style="color:#ff8f8f">⚔ ${escapeHtml(RL.ENEMY_TYPES[RL.bossForDepth(game.depth)].name.toUpperCase())}</span>` : "";
     document.getElementById("hud").innerHTML =
       `<div class="hpbar"><div class="hpfill" style="width:${pct}%"></div>` +
       `<div class="hptext">${Math.max(0, p.hp)} / ${p.maxHp} HP</div></div>` +
       `<div class="muted">atk ${4 + p.weaponBonus + p.attackBonus} · ${escapeHtml(p.weaponName)}` +
       (p.regen > 0 ? ` · regen ${p.regen}` : "") +
-      ` · d${game.depth} · t${game.turn} · k${game.kills}</div>` +
-      (game.gameOver ? `<div class="dead">YOU DIED — press New run</div>` : "");
+      ` · d${game.depth}${game.endless ? "∞" : "/" + RL.FINAL_DEPTH} · t${game.turn} · k${game.kills}${bossBadge}</div>` +
+      (game.gameOver && !game.won ? `<div class="dead">YOU DIED — press New run</div>` : "");
 
     const inv = document.getElementById("inv");
     if (!game.inventory.length) { inv.innerHTML = `<div class="muted">inventory empty · walk over items, press g</div>`; return; }
@@ -2106,38 +2182,73 @@ if (typeof document !== "undefined") {
   function doPickup() { if (game && !game.gameOver) act(() => { playerPickup(game); }); }
   function doDescend() {
     if (!game || game.gameOver || !onStairs()) return;
+    // Descending from the final campaign floor clears the game (until you opt into
+    // endless). After that, descending just goes deeper forever.
+    if (game.depth >= RL.FINAL_DEPTH && !game.endless) { winRun(); return; }
     game = descend(game);
     RL.advanceGame(game);
+    onNewFloor("You descend to depth " + game.depth + ".");
+  }
+  // Shared "arrived on a fresh floor" handling: refresh UI, snap effects, announce
+  // a boss floor, and end the run if the arrival somehow killed the player.
+  function onNewFloor(msg) {
     document.getElementById("depthShow").textContent = game.depth;
-    note("You descend to depth " + game.depth + ".");
+    note(msg);
+    if (RL.isBossFloor(game.depth)) {
+      const b = RL.ENEMY_TYPES[RL.bossForDepth(game.depth)];
+      const finalOne = game.depth === RL.FINAL_DEPTH && !game.endless;
+      note((finalOne ? "The FINAL BOSS" : "A boss") + " guards the stairs: the " + b.name + ".");
+    }
     resetFx(); // fresh floor — snap, don't slide entities across the map
     blip("descend");
-    if (game.gameOver) showDeath();
+    if (game.gameOver) showEnd();
     render();
   }
+  function winRun() {
+    game.won = true; game.gameOver = true; game.overReason = "won";
+    blip("win");
+    showEnd();
+    render();
+  }
+  function continueEndless() {
+    game.endless = true;
+    game = descend(game);      // FINAL_DEPTH + 1; endless carried forward
+    RL.advanceGame(game);
+    hideEnd();
+    onNewFloor("You press on into the endless dark…");
+  }
 
-  /* --- Death screen ------------------------------------------------------- */
-  function showDeath() {
-    const g = game;
+  /* --- End-of-run screen (death or victory) ------------------------------ */
+  function showEnd() {
+    const g = game, won = g.won;
     const row = (k, v) => `<tr><td class="k">${k}</td><td class="v">${v}</td></tr>`;
+    const depthLabel = g.endless ? "Depth reached" : (won ? "Floors cleared" : "Depth reached");
+    let btns = "";
+    if (won) {
+      btns = `<button class="primary" id="continueBtn">Continue (Endless)</button>` +
+             `<button id="newSeedBtn">New seed</button>`;
+    } else {
+      btns = `<button class="primary" id="retryBtn">Retry this seed</button>` +
+             `<button id="newSeedBtn">New seed</button>`;
+    }
     document.getElementById("overlayCard").innerHTML =
-      `<h2>YOU DIED</h2>` +
-      `<div class="sub">seed <code>${escapeHtml(g.seed)}</code></div>` +
+      `<h2 class="${won ? "win" : ""}">${won ? "DUNGEON CLEARED" : "YOU DIED"}</h2>` +
+      `<div class="sub">${won ? "You beat the final boss!" : ""} seed <code>${escapeHtml(g.seed)}</code></div>` +
       `<table>` +
-        row("Depth reached", g.depth) +
+        row(depthLabel, g.depth) +
         row("Turns taken", g.turn) +
         row("Enemies killed", g.kills) +
         row("Items found", g.itemsFound) +
       `</table>` +
-      `<div class="btns">` +
-        `<button class="primary" id="retryBtn">Retry this seed</button>` +
-        `<button id="newSeedBtn">New seed</button>` +
-      `</div>`;
+      `<div class="btns">${btns}</div>`;
     document.getElementById("overlay").classList.add("show");
-    document.getElementById("retryBtn").onclick = () => newRun(g.seed);
+    const retry = document.getElementById("retryBtn");
+    if (retry) retry.onclick = () => newRun(g.seed);
+    const cont = document.getElementById("continueBtn");
+    if (cont) cont.onclick = () => continueEndless();
     document.getElementById("newSeedBtn").onclick = () => newRun(pickSeed());
   }
-  function hideDeath() { document.getElementById("overlay").classList.remove("show"); }
+  function hideEnd() { document.getElementById("overlay").classList.remove("show"); }
 
   /* --- Keyboard input ----------------------------------------------------- */
   // One keydown = one turn. Actions resolve synchronously (animation is async and
