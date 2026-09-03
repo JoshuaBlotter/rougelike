@@ -5,16 +5,20 @@ same dungeon, same loot, same enemy placements — on any machine. Different see
 neither of us has seen before. Enemies hunt intelligently around corners rather than
 walking into walls.
 
-**Play it:** open [`roguelike.html`](roguelike.html) in any browser. No build, no server,
-no dependencies, no assets — one self-contained file. Everything is drawn procedurally.
+**Play it online:** <https://joshuablotter.github.io/rougelike/>
+
+**Or run it locally:** open [`roguelike.html`](roguelike.html) in any browser. No build, no
+server, no dependencies, no assets — one self-contained file. Everything is drawn procedurally.
 
 ## Controls
 
 - **Move:** arrow keys, WASD, or vi-keys (`hjkl` + diagonals `yubn`)
 - **Wait:** space or `.`
-- **Pick up:** `g` &nbsp;·&nbsp; **Use item:** number keys `1`–`8`
+- **Pick up:** `g` &nbsp;·&nbsp; **Use item:** number keys `1`–`8` (or tap an inventory slot)
 - **Descend:** `>` while standing on the stairs (`>`)
-- **Share a run:** the seed shows on screen; append `?seed=YOURSEED` to the URL
+- **Touch:** an on-screen D-pad and action buttons appear on tablets/phones
+- **Share a run:** the seed shows on screen and the death screen; append `?seed=YOURSEED` to
+  the URL so someone else gets your exact dungeon. Died? **Retry this seed** replays it.
 
 ## Design highlights
 
@@ -32,6 +36,9 @@ no dependencies, no assets — one self-contained file. Everything is drawn proc
   state machine — enemies chase your *last-known position* around corners and can be wrong.
 - **Energy-based turns** for speed variety, six orthogonal item effects, and six enemy
   archetypes on a tuned difficulty curve.
+- **Cosmetic-only juice** layered strictly on top of the resolved sim: smooth movement
+  interpolation, screen shake, hit flashes, a damage vignette, and synthesised Web Audio
+  blips — none of it ever writes back into game state, so determinism is untouched.
 
 ## Debug & tests
 

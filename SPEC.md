@@ -19,11 +19,12 @@ verification gates that must pass before the next one starts.
 
 ## Implementation status (as of 2026-09-03)
 
-Milestones **1–6 complete**; milestone 7 (polish) not yet started. The whole game lives in
-one self-contained `roguelike.html` (~1900 lines). The full simulation runs headless in Node
-via `test-node.js`, which extracts the `<script>` and evaluates it with no DOM present —
-proving the sim/render separation is literally true. **18/18 tests pass** (`?test=1` in the
-browser, or `node test-node.js`).
+Milestones **1–7 complete**. The whole game lives in one self-contained `roguelike.html`
+(~2000 lines). The full simulation runs headless in Node via `test-node.js`, which extracts
+the `<script>` and evaluates it with no DOM present — proving the sim/render separation is
+literally true. **18/18 tests pass** (`?test=1` in the browser, or `node test-node.js`).
+Playable online at <https://joshuablotter.github.io/rougelike/> (GitHub Pages serves the
+single static file directly).
 
 | # | Milestone | Status | Gate result |
 |---|-----------|--------|-------------|
@@ -33,7 +34,7 @@ browser, or `node test-node.js`).
 | 4 | Enemies + flow-field pathfinding + state machine | ✅ done | test 6 passes; flow overlay verified |
 | 5 | Combat, energy system, items, inventory | ✅ done | tests 7, 8 pass |
 | 6 | Depth scaling + 6 archetypes + difficulty curve | ✅ done | balance harness report; curve tuned |
-| 7 | Polish (death screen, URL seeds, touch, juice, audio) | ⬜ **todo** | — |
+| 7 | Polish (death screen, URL seeds, touch, juice, audio) | ✅ done | 18/18 still pass; render-only effects layer |
 
 **Notable decisions / deviations, with rationale:**
 
@@ -64,6 +65,15 @@ browser, or `node test-node.js`).
 - **Locked doors / keys not implemented** — the softlock-avoidance section is written
   conditionally ("if you add locked doors"); none were added, so that check is a documented
   no-op rather than a faked pass.
+- **M7 juice is a strictly render-only effects layer.** Movement interpolation, screen shake,
+  hit flashes, and the damage vignette are all derived from a before/after *diff* taken around
+  each action in `act()` — no new fields are added to the sim, and nothing animation-side is
+  ever read back by game logic. Shake jitter is time-driven `sin`/`cos` (not RNG), so it needs
+  no cosmetic stream and can't perturb determinism; the `Math.random` grep (test 5) stays clean.
+  Interpolation **snaps** instead of sliding when an actor jumps more than ~1.5 tiles (blink,
+  descend, teleport), which avoids an entity smearing across the whole map. Audio is
+  synthesised Web Audio blips (no assets), unlocked on the input gesture that drives the action,
+  and fully guarded so a missing/blocked AudioContext never breaks the game.
 
 The build order below is annotated with the same status.
 
@@ -316,10 +326,12 @@ running at the end of each one.
    drops. Gate: tests 7 and 8 pass.
 6. ✅ **Depth scaling and archetypes.** Spawn tables per depth, 5–6 distinct enemy archetypes,
    difficulty curve. Gate: play floors 1–10, report where it felt flat or unfair.
-7. ⬜ **Polish.** Message log, death screen, seed sharing via URL, touch controls, screen shake,
-   hit flashes, Web Audio blips. *(Not started. Note: a basic message log and the `?seed=` URL
-   parameter already exist from earlier milestones; the death SCREEN with run summary + retry
-   buttons, touch controls, and the visual/audio juice remain.)*
+7. ✅ **Polish.** Death screen with run summary (depth, turns, kills, items, seed) + **retry
+   this seed** / **new seed** buttons; on-screen touch D-pad, get/descend buttons, and tappable
+   inventory slots (shown on coarse pointers / small screens); movement interpolation; screen
+   shake; hit flashes; a damage vignette; and synthesised Web Audio blips with a mute toggle.
+   The message log and `?seed=` URL sharing carried over from earlier milestones. Gate: 18/18
+   tests still pass, and the whole layer is render-only (see the M7 note above).
 
 ## 11. Working agreement
 

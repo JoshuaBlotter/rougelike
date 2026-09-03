@@ -42,15 +42,66 @@
   #msglog div { color: #9aa6b8; }
   #msglog div:last-child { color: #d6deea; }
   label { display: flex; align-items: center; gap: 6px; margin: 3px 0; color: #9aa6b8; }
+
+  /* --- Milestone 7 polish: stage overlay, death screen, touch controls --- */
+  #stage { position: relative; display: inline-block; line-height: 0; max-width: 100%; touch-action: manipulation; }
+  #game { display: block; max-width: 100%; height: auto; }
+  #overlay { position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
+             background: rgba(5,6,10,.72); line-height: 1.4; border-radius: 6px; }
+  #overlay.show { display: flex; }
+  .card { background: #10141c; border: 1px solid #2a3346; border-radius: 8px; padding: 18px 22px;
+          text-align: center; box-shadow: 0 8px 40px rgba(0,0,0,.55); max-width: 88%; }
+  .card h2 { margin: 0 0 2px; font-size: 22px; letter-spacing: 3px; color: #ff6b6b; }
+  .card .sub { color: #6b7688; margin-bottom: 12px; }
+  .card table { margin: 0 auto 14px; border-collapse: collapse; font-size: 13px; }
+  .card td { padding: 2px 10px; }
+  .card td.k { color: #6b7688; text-align: right; }
+  .card td.v { color: #e6ebf2; font-weight: bold; text-align: left; }
+  .card .btns { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+  .card button { padding: 8px 14px; }
+  .card button.primary { background: #1e3a2a; border-color: #2f6d4a; color: #8ef0a0; }
+  .card button.primary:hover { background: #245036; }
+
+  /* touch controls — shown on coarse pointers / small screens only */
+  #touch { display: none; margin-top: 10px; gap: 18px; align-items: center; justify-content: center; user-select: none; }
+  #dpad { display: grid; grid-template-columns: repeat(3, 46px); grid-template-rows: repeat(3, 46px); gap: 4px; }
+  #dpad button, #acts button { font: 15px/1 ui-monospace, monospace; padding: 0; height: 46px; cursor: pointer;
+      background: #161c28; border: 1px solid #2a3346; border-radius: 6px; color: #c8d0dc; }
+  #dpad button:active, #acts button:active { background: #2a3346; }
+  #dpad .wait { color: #6b7688; }
+  #acts { display: grid; grid-auto-flow: row; gap: 4px; }
+  #acts button { width: 72px; }
+  @media (pointer: coarse), (max-width: 780px) { #touch { display: flex; } }
+  #soundBtn { flex: 0 0 auto; cursor: pointer; }
 </style>
 
 <div id="wrap">
-  <canvas id="game" width="704" height="704"></canvas>
+  <div id="stage">
+    <canvas id="game" width="704" height="704"></canvas>
+    <div id="overlay"><div class="card" id="overlayCard"></div></div>
+    <div id="touch">
+      <div id="dpad">
+        <button data-dx="-1" data-dy="-1">↖</button>
+        <button data-dx="0"  data-dy="-1">↑</button>
+        <button data-dx="1"  data-dy="-1">↗</button>
+        <button data-dx="-1" data-dy="0">←</button>
+        <button data-dx="0"  data-dy="0" class="wait">•</button>
+        <button data-dx="1"  data-dy="0">→</button>
+        <button data-dx="-1" data-dy="1">↙</button>
+        <button data-dx="0"  data-dy="1">↓</button>
+        <button data-dx="1"  data-dy="1">↘</button>
+      </div>
+      <div id="acts">
+        <button data-act="pickup">get</button>
+        <button data-act="descend">&gt; down</button>
+      </div>
+    </div>
+  </div>
   <div id="side">
     <h1>SEEDED ROGUELIKE</h1>
     <div class="panel">
       <div class="muted">seed</div>
-      <div class="row"><input id="seedInput" spellcheck="false"><button id="seedGo">New run</button></div>
+      <div class="row"><input id="seedInput" spellcheck="false"><button id="seedGo">New run</button><button id="soundBtn" title="toggle sound">🔊</button></div>
       <div class="muted">Current: <code id="seedShow">—</code> · depth <span id="depthShow">1</span></div>
     </div>
     <div class="panel" id="hud"></div>
@@ -62,7 +113,9 @@
     </div>
     <div class="panel muted" style="font-size:12px">
       Move: arrows / WASD / hjkl+yubn · wait: space or .<br>
-      Diagonals blocked through wall-corner gaps.
+      Pick up: g · use item: 1–8 (or tap a slot) · descend: &gt;<br>
+      Touch: on-screen pad appears on tablets/phones.<br>
+      Share a run: append <code>?seed=</code> to the URL.
     </div>
   </div>
 </div>
@@ -1646,17 +1699,71 @@ if (typeof document !== "undefined") {
   let game;
   const debugState = { revealAll: false, flow: false };
 
+  const now = () => (typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now();
+
+  /* --- Cosmetic effects layer (Milestone 7 juice) ------------------------
+   * Movement interpolation, screen shake, hit flashes, damage vignette. ALL
+   * of it is render-only: it reads the resolved sim state and NEVER writes to
+   * it, so animation can never feed back into game logic. Effects are derived
+   * from a before/after diff taken in act(); no new state lives on the sim. */
+  const ANIM_MS = 95, SHAKE_MS = 260, HURT_MS = 320, FLASH_MS = 200;
+  const fx = { from: null, animAt: 0, snap: true, shakeMag: 0, shakeAt: -1e9, hurtAt: -1e9, flashes: [], raf: 0 };
+  const clamp01 = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
+  const ease = (f) => (f < 0.5 ? 2 * f * f : 1 - Math.pow(-2 * f + 2, 2) / 2); // easeInOutQuad
+  const frac = () => clamp01((now() - fx.animAt) / ANIM_MS);
+  const shakeNow = () => { const k = 1 - (now() - fx.shakeAt) / SHAKE_MS; return k > 0 ? fx.shakeMag * k : 0; };
+  function addFlash(x, y, color) { fx.flashes.push({ x, y, color, at: now() }); }
+  function resetFx() { fx.from = null; fx.snap = true; fx.flashes.length = 0; fx.hurtAt = -1e9; fx.shakeAt = -1e9; }
+  function startLoop() { if (!fx.raf) fx.raf = requestAnimationFrame(loop); }
+  function effectsActive() {
+    return (fx.from && !fx.snap && (now() - fx.animAt) < ANIM_MS) ||
+           shakeNow() > 0.15 || (now() - fx.hurtAt) < HURT_MS || fx.flashes.length > 0;
+  }
+  function loop() { fx.raf = 0; draw(); if (effectsActive()) startLoop(); }
+  // Interpolated pixel position of an actor between its pre-action cell and its
+  // resolved cell. Large jumps (blink, descend, teleport) snap instead of sliding.
+  function actorPix(id, gx, gy) {
+    const f = fx.from && !fx.snap ? fx.from.get(id) : null;
+    if (f && Math.max(Math.abs(gx - f.x), Math.abs(gy - f.y)) <= 1.5) {
+      const t = ease(frac());
+      return [(f.x + (gx - f.x) * t) * CELL, (f.y + (gy - f.y) * t) * CELL];
+    }
+    return [gx * CELL, gy * CELL];
+  }
+
+  /* --- Web Audio blips (synthesised; no assets) --------------------------- */
+  let audioOn = true, audioCtx = null;
+  const SOUNDS = {
+    hit:     { wave: "square",   f0: 520, f1: 180, dur: 0.09, vol: 0.10 },
+    hurt:    { wave: "sawtooth", f0: 200, f1: 70,  dur: 0.16, vol: 0.15 },
+    kill:    { wave: "triangle", f0: 320, f1: 60,  dur: 0.18, vol: 0.13 },
+    pickup:  { wave: "square",   f0: 620, f1: 1040,dur: 0.10, vol: 0.09 },
+    use:     { wave: "triangle", f0: 440, f1: 880, dur: 0.10, vol: 0.09 },
+    descend: { wave: "sine",     f0: 150, f1: 330, dur: 0.24, vol: 0.13 },
+    death:   { wave: "sawtooth", f0: 220, f1: 40,  dur: 0.70, vol: 0.17 },
+  };
+  function blip(type) {
+    if (!audioOn) return;
+    const s = SOUNDS[type]; if (!s) return;
+    try {
+      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtx.state === "suspended") audioCtx.resume(); // unlock on the gesture that drove this action
+      const t = audioCtx.currentTime, o = audioCtx.createOscillator(), g = audioCtx.createGain();
+      o.type = s.wave; o.frequency.setValueAtTime(s.f0, t);
+      if (s.f1) o.frequency.exponentialRampToValueAtTime(s.f1, t + s.dur);
+      g.gain.setValueAtTime(s.vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + s.dur);
+      o.connect(g); g.connect(audioCtx.destination); o.start(t); o.stop(t + s.dur);
+    } catch (_) { /* audio unavailable: stay silent, never break the game */ }
+  }
+
   function pickSeed() {
     return params.get("seed") || Math.floor(API.mulberry32(fnv1a(String(Date.now())))() * 1e9).toString(36);
     // ^ cosmetic-only: choosing a *new* random seed string is outside the sim.
     //   Once chosen, the run is fully deterministic from that string.
   }
 
-  function log(msg) {
-    game.messages.push(msg);
-    if (game.messages.length > 5) game.messages.shift();
-    renderSide();
-  }
+  // A UI-only notice (e.g. "Blocked."), kept on the same message log the sim uses.
+  function note(msg) { game.messages.push(msg); if (game.messages.length > 6) game.messages.shift(); }
 
   function newRun(seed, depth = 1) {
     game = createGame(seed, depth);
@@ -1666,8 +1773,38 @@ if (typeof document !== "undefined") {
     game.messages = ["Welcome. Seed: " + game.seed];
     RL.advanceGame(game); // fast-forward to the player's first turn
     if (DEBUG) RL.updateFlow(game); // populate the flow cache so the overlay shows pre-move
-    renderSide();
-    draw();
+    resetFx();
+    hideDeath();
+    if (game.gameOver) showDeath();
+    render();
+  }
+
+  // Run one player action, then derive cosmetic effects from a before/after
+  // diff. The sim is fully resolved inside run(); everything after only reads it.
+  function act(run) {
+    if (!game || game.gameOver) return;
+    const wasOver = game.gameOver, prevHp = game.player.hp, prevItems = game.itemsFound;
+    const from = new Map();
+    from.set("p", { x: game.player.x, y: game.player.y });
+    for (const e of game.enemies) if (e.alive) from.set(e.id, { x: e.x, y: e.y, hp: e.hp });
+
+    run();
+
+    fx.snap = false; fx.from = from; fx.animAt = now();
+    for (const e of game.enemies) {
+      const f = from.get(e.id); if (!f) continue;
+      if (!e.alive) { addFlash(e.x, e.y, "255,150,60"); blip("kill"); }        // died where it stood
+      else if (e.hp < f.hp) { addFlash(e.x, e.y, "255,255,255"); blip("hit"); } // took a hit
+    }
+    if (game.player.hp < prevHp) {
+      addFlash(game.player.x, game.player.y, "255,60,60");
+      fx.hurtAt = now(); fx.shakeMag = Math.min(9, 3 + (prevHp - game.player.hp)); fx.shakeAt = now();
+      blip("hurt");
+    }
+    if (game.itemsFound > prevItems) blip("pickup");
+    if (game.gameOver && !wasOver) { blip("death"); fx.shakeMag = 10; fx.shakeAt = now(); showDeath(); }
+    render();
+    startLoop();
   }
 
   function renderHud() {
@@ -1683,10 +1820,10 @@ if (typeof document !== "undefined") {
 
     const inv = document.getElementById("inv");
     if (!game.inventory.length) { inv.innerHTML = `<div class="muted">inventory empty · walk over items, press g</div>`; return; }
-    inv.innerHTML = `<div class="muted" style="margin-bottom:4px">inventory (${game.inventory.length}/${RL.INV_CAP}) — press number to use</div>` +
+    inv.innerHTML = `<div class="muted" style="margin-bottom:4px">inventory (${game.inventory.length}/${RL.INV_CAP}) — press number or tap to use</div>` +
       game.inventory.map((s, i) => {
         const d = RL.ITEM_DEFS[s.defId];
-        return `<div class="slot"><span><span class="n">${i + 1}</span> <span style="color:${d.color}">${d.glyph}</span> ${escapeHtml(d.name)}</span>` +
+        return `<div class="slot" data-slot="${i}" style="cursor:pointer"><span><span class="n">${i + 1}</span> <span style="color:${d.color}">${d.glyph}</span> ${escapeHtml(d.name)}</span>` +
                `<span class="muted">${s.count > 1 ? "x" + s.count : ""}</span></div>`;
       }).join("");
   }
@@ -1710,10 +1847,10 @@ if (typeof document !== "undefined") {
       if (rv) rv.onchange = (e) => { debugState.revealAll = e.target.checked; draw(); };
       const fv = document.getElementById("dbgFlow");
       if (fv) fv.onchange = (e) => { debugState.flow = e.target.checked; RL.updateFlow(game); draw(); };
-      document.getElementById("dbgStep").onclick = () => { playerMove(game, 0, 0); draw(); renderSide(); };
+      document.getElementById("dbgStep").onclick = () => doMove(0, 0);
       document.getElementById("dbgStairs").onclick = () => {
         game.player.x = game.floor.stairs.x; game.player.y = game.floor.stairs.y;
-        RL.updateFOV(game); RL.updateFlow(game); draw(); renderSide();
+        RL.updateFOV(game); RL.updateFlow(game); resetFx(); render();
       };
       document.getElementById("dbgReport").onclick = () => {
         const out = document.getElementById("dbgReportOut");
@@ -1734,7 +1871,12 @@ if (typeof document !== "undefined") {
 
   function draw() {
     ctx.fillStyle = "#05060a";
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillRect(0, 0, canvas.width, canvas.height); // full clear (unshaken); revealed edges match this
+    // Screen shake: translate the whole world by a decaying jitter. Deterministic
+    // (time-driven sin/cos) so it needs no RNG and can't touch the sim.
+    const s = shakeNow();
+    ctx.save();
+    if (s > 0.15) ctx.translate(Math.sin(now() * 0.05) * s, Math.cos(now() * 0.043) * s);
     const reveal = debugState.revealAll;
     for (let y = 0; y < game.h; y++) {
       for (let x = 0; x < game.w; x++) {
@@ -1781,40 +1923,114 @@ if (typeof document !== "undefined") {
       ctx.fillText(d.glyph, it.x * CELL + CELL / 2, it.y * CELL + CELL / 2 + 1);
     }
 
-    // Enemies — only where currently visible (never drawn from memory).
+    // Hit flashes: a brief tint over the cell where damage (or a death) landed.
+    fx.flashes = fx.flashes.filter((fl) => now() - fl.at < FLASH_MS);
+    for (const fl of fx.flashes) {
+      const a = (1 - (now() - fl.at) / FLASH_MS) * 0.55;
+      ctx.fillStyle = `rgba(${fl.color},${a.toFixed(3)})`;
+      ctx.fillRect(fl.x * CELL, fl.y * CELL, CELL - 1, CELL - 1);
+    }
+
+    // Enemies — only where currently visible (never drawn from memory),
+    // interpolated from their pre-action cell so movement reads as motion.
     ctx.textAlign = "center"; ctx.textBaseline = "middle";
     for (const e of game.enemies) {
       if (!e.alive) continue;
       const i = idx(e.x, e.y);
       if (!(reveal || game.visible[i])) continue;
       const t = RL.ENEMY_TYPES[e.typeId];
+      const [px, py] = actorPix(e.id, e.x, e.y);
       ctx.fillStyle = t.color;
       ctx.font = "bold 14px ui-monospace, monospace";
-      ctx.fillText(t.glyph, e.x * CELL + CELL / 2, e.y * CELL + CELL / 2 + 1);
+      ctx.fillText(t.glyph, px + CELL / 2, py + CELL / 2 + 1);
       if (DEBUG) {
         ctx.fillStyle = STATE_COLOR[e.state] || "#8899aa";
         ctx.font = "7px monospace";
-        ctx.fillText(e.state, e.x * CELL + CELL / 2, e.y * CELL - 2);
+        ctx.fillText(e.state, px + CELL / 2, py - 2);
       }
     }
 
     // Player (always drawn; it's the observer and always visible).
     const p = game.player;
+    const [ppx, ppy] = actorPix("p", p.x, p.y);
     ctx.fillStyle = "#ffd36b";
-    ctx.fillRect(p.x * CELL + 2, p.y * CELL + 2, CELL - 5, CELL - 5);
+    ctx.fillRect(ppx + 2, ppy + 2, CELL - 5, CELL - 5);
     if (DEBUG) {
       ctx.fillStyle = "#4a5568";
       ctx.font = "10px monospace";
       ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
       ctx.fillText(`turn ${game.turn}`, 4, 12);
     }
+    ctx.restore(); // end shake transform
+
+    // Damage vignette: a red edge-glow that fades after the player is hurt.
+    const hk = 1 - (now() - fx.hurtAt) / HURT_MS;
+    if (hk > 0) {
+      const cx = canvas.width / 2, cy = canvas.height / 2;
+      const grd = ctx.createRadialGradient(cx, cy, canvas.width * 0.3, cx, cy, canvas.width * 0.72);
+      grd.addColorStop(0, "rgba(180,0,0,0)");
+      grd.addColorStop(1, `rgba(180,0,0,${(hk * 0.5).toFixed(3)})`);
+      ctx.fillStyle = grd;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
   }
   const STATE_COLOR = { idle: "#5a6472", alerted: "#ffd36b", hunting: "#ff6b6b", searching: "#c58bff" };
 
   function onStairs() { return tileAt(game, game.player.x, game.player.y) === TILE.STAIRS; }
+  function render() { draw(); renderSide(); }
 
-  // Input: one keydown = one turn. Held keys don't queue (keydown repeat is
-  // ignored via a resolving flag), matching the "no sub-turn input queue" rule.
+  /* --- Player action wrappers (each is one turn) -------------------------- */
+  function doMove(dx, dy) {
+    if (!game || game.gameOver) return;
+    act(() => {
+      const acted = playerMove(game, dx, dy); // move / attack / wait; enemies then act
+      if (!acted && (dx || dy)) note("Blocked.");
+      else if (onStairs() && !game.gameOver) note("Stairs down. Press > to descend.");
+    });
+  }
+  function doUse(slot) {
+    if (!game || game.gameOver || !game.inventory[slot]) return;
+    act(() => { if (usePlayerItem(game, slot)) blip("use"); });
+  }
+  function doPickup() { if (game && !game.gameOver) act(() => { playerPickup(game); }); }
+  function doDescend() {
+    if (!game || game.gameOver || !onStairs()) return;
+    game = descend(game);
+    RL.advanceGame(game);
+    document.getElementById("depthShow").textContent = game.depth;
+    note("You descend to depth " + game.depth + ".");
+    resetFx(); // fresh floor — snap, don't slide entities across the map
+    blip("descend");
+    if (game.gameOver) showDeath();
+    render();
+  }
+
+  /* --- Death screen ------------------------------------------------------- */
+  function showDeath() {
+    const g = game;
+    const row = (k, v) => `<tr><td class="k">${k}</td><td class="v">${v}</td></tr>`;
+    document.getElementById("overlayCard").innerHTML =
+      `<h2>YOU DIED</h2>` +
+      `<div class="sub">seed <code>${escapeHtml(g.seed)}</code></div>` +
+      `<table>` +
+        row("Depth reached", g.depth) +
+        row("Turns taken", g.turn) +
+        row("Enemies killed", g.kills) +
+        row("Items found", g.itemsFound) +
+      `</table>` +
+      `<div class="btns">` +
+        `<button class="primary" id="retryBtn">Retry this seed</button>` +
+        `<button id="newSeedBtn">New seed</button>` +
+      `</div>`;
+    document.getElementById("overlay").classList.add("show");
+    document.getElementById("retryBtn").onclick = () => newRun(g.seed);
+    document.getElementById("newSeedBtn").onclick = () => newRun(pickSeed());
+  }
+  function hideDeath() { document.getElementById("overlay").classList.remove("show"); }
+
+  /* --- Keyboard input ----------------------------------------------------- */
+  // One keydown = one turn. Actions resolve synchronously (animation is async and
+  // non-blocking), so there is never a sub-turn input queue.
   const KEYMAP = {
     ArrowUp: [0,-1], ArrowDown: [0,1], ArrowLeft: [-1,0], ArrowRight: [1,0],
     w: [0,-1], s: [0,1], a: [-1,0], d: [1,0],
@@ -1822,46 +2038,36 @@ if (typeof document !== "undefined") {
     y: [-1,-1], u: [1,-1], b: [-1,1], n: [1,1],
     " ": [0,0], ".": [0,0],
   };
-  let resolving = false;
   window.addEventListener("keydown", (e) => {
-    if (resolving) return;
-    if (game.gameOver) return; // dead: ignore gameplay keys until New run
+    if (e.target && e.target.tagName === "INPUT") return; // typing a seed, not playing
+    if (game.gameOver) return;                            // dead: buttons only, until a new run
     const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
-    resolving = true;
-    try {
-      // Descend on the stairs with '>'.
-      if (key === ">" && onStairs()) {
-        e.preventDefault();
-        game = descend(game);
-        RL.advanceGame(game);
-        document.getElementById("depthShow").textContent = game.depth;
-        pushAndRender("You descend to depth " + game.depth + ".");
-        return;
-      }
-      // Use inventory slot 1-8.
-      if (key >= "1" && key <= "8") {
-        e.preventDefault();
-        if (usePlayerItem(game, parseInt(key, 10) - 1)) renderAll();
-        return;
-      }
-      // Pick up.
-      if (key === "g") { e.preventDefault(); playerPickup(game); renderAll(); return; }
-
-      const mv = KEYMAP[key];
-      if (!mv) return;
-      e.preventDefault();
-      const acted = playerMove(game, mv[0], mv[1]); // move / attack / wait; enemies then act
-      if (!acted && (mv[0] || mv[1])) log("Blocked.");
-      else if (onStairs() && !game.gameOver) log("Stairs down. Press > to descend.");
-      renderAll();
-    } finally {
-      // No animation yet; unlock immediately. (Milestone 7 adds interpolation.)
-      resolving = false;
-    }
+    if (key === ">" && onStairs()) { e.preventDefault(); doDescend(); return; }
+    if (key >= "1" && key <= "8") { e.preventDefault(); doUse(parseInt(key, 10) - 1); return; }
+    if (key === "g") { e.preventDefault(); doPickup(); return; }
+    const mv = KEYMAP[key];
+    if (!mv) return;
+    e.preventDefault();
+    doMove(mv[0], mv[1]);
   });
-  function renderAll() { draw(); renderSide(); }
-  function pushAndRender(msg) { game.messages.push(msg); renderAll(); }
 
+  /* --- Touch controls (shown on coarse pointers / small screens) ---------- */
+  document.getElementById("dpad").addEventListener("click", (e) => {
+    const b = e.target.closest("button"); if (!b) return;
+    doMove(parseInt(b.dataset.dx, 10), parseInt(b.dataset.dy, 10));
+  });
+  document.getElementById("acts").addEventListener("click", (e) => {
+    const b = e.target.closest("button"); if (!b) return;
+    if (b.dataset.act === "pickup") doPickup();
+    else if (b.dataset.act === "descend") doDescend();
+  });
+  // Tap an inventory slot to use it (delegated: survives innerHTML rewrites).
+  document.getElementById("inv").addEventListener("click", (e) => {
+    const s = e.target.closest(".slot"); if (!s || s.dataset.slot == null) return;
+    doUse(parseInt(s.dataset.slot, 10));
+  });
+
+  /* --- Seed + sound controls --------------------------------------------- */
   document.getElementById("seedGo").onclick = () => {
     const v = document.getElementById("seedInput").value.trim();
     newRun(v || pickSeed());
@@ -1869,6 +2075,8 @@ if (typeof document !== "undefined") {
   document.getElementById("seedInput").addEventListener("keydown", (e) => {
     if (e.key === "Enter") document.getElementById("seedGo").click();
   });
+  const soundBtn = document.getElementById("soundBtn");
+  soundBtn.onclick = () => { audioOn = !audioOn; soundBtn.textContent = audioOn ? "🔊" : "🔇"; };
 
   // Boot.
   if (params.get("test") === "1") {
