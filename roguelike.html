@@ -41,9 +41,12 @@
   .slot .n { color: #6b7688; width: 16px; }
   .dead { color: #ff6b6b; font-weight: bold; }
   code { color: #9fd3ff; }
-  #msglog { min-height: 72px; }
-  #msglog div { color: #9aa6b8; }
-  #msglog div:last-child { color: #d6deea; }
+  /* Message log floats as a transparent overlay over the top-left of the map. */
+  #msglog { position: absolute; top: 6px; left: 6px; max-width: 62%; margin: 0; padding: 3px 6px;
+    background: none; border: none; border-radius: 4px; pointer-events: none;
+    font-size: 12px; line-height: 1.35; text-shadow: 0 1px 2px #000, 0 0 4px #000; }
+  #msglog div { color: #aeb9c9; }
+  #msglog div:last-child { color: #ffffff; } /* newest message brightest */
   label { display: flex; align-items: center; gap: 6px; margin: 3px 0; color: #9aa6b8; }
 
   /* --- Milestone 7 polish: stage overlay, death screen, touch controls --- */
@@ -65,15 +68,17 @@
   .card button.primary { background: #1e3a2a; border-color: #2f6d4a; color: #8ef0a0; }
   .card button.primary:hover { background: #245036; }
 
-  /* touch controls — shown on coarse pointers / small screens only */
-  #touch { display: none; margin-top: 10px; gap: 18px; align-items: center; justify-content: center; user-select: none; }
+  /* touch controls — shown on coarse pointers / small screens only. The center
+     button is a context-aware Interact: pick up / descend / wait, self-labelling. */
+  #touch { display: none; margin-top: 10px; align-items: center; justify-content: center; user-select: none; }
   #dpad { display: grid; grid-template-columns: repeat(3, 46px); grid-template-rows: repeat(3, 46px); gap: 4px; }
-  #dpad button, #acts button { font: 15px/1 ui-monospace, monospace; padding: 0; height: 46px; cursor: pointer;
+  #dpad button { font: 15px/1 ui-monospace, monospace; padding: 0; height: 46px; cursor: pointer;
       background: #161c28; border: 1px solid #2a3346; border-radius: 6px; color: #c8d0dc; touch-action: manipulation; }
-  #dpad button:active, #acts button:active { background: #2a3346; }
-  #dpad .wait { color: #6b7688; }
-  #acts { display: grid; grid-auto-flow: row; gap: 4px; }
-  #acts button { width: 72px; }
+  #dpad button:active { background: #2a3346; }
+  #interactBtn { font-weight: bold; }
+  #interactBtn[data-mode="wait"] { color: #6b7688; }                        /* nothing here — just wait */
+  #interactBtn[data-mode="get"]  { color: #8ef0a0; border-color: #2f6d4a; } /* an item underfoot */
+  #interactBtn[data-mode="down"] { color: #8be9fd; border-color: #2a5a66; } /* standing on stairs */
   #soundBtn { flex: 0 0 auto; cursor: pointer; }
 
   /* -------- Mobile / touch layout: one thumb-friendly column -------- */
@@ -84,22 +89,19 @@
     /* #side dissolves so its panels become direct flex items we can reorder */
     #side { display: contents; }
     #side h1 { display: none; }              /* reclaim vertical space on small screens */
-    /* explicit vertical order: status, map, controls, log, inventory, then setup */
+    /* explicit vertical order: status, map (log overlays it), controls, inventory, setup */
     #hud       { order: 1; margin: 0; }
     #stage     { order: 2; align-self: center; }
     #touch     { order: 3; margin: 6px 0; }
-    #msglog    { order: 4; margin: 0; min-height: 0; }
-    #inv       { order: 5; margin: 0; }
-    #seedPanel { order: 6; margin: 0; }
-    #helpPanel { order: 7; margin: 0; }
-    #debugWrap { order: 8; margin: 0; }
+    #inv       { order: 4; margin: 0; }
+    #seedPanel { order: 5; margin: 0; }
+    #helpPanel { order: 6; margin: 0; }
+    #debugWrap { order: 7; margin: 0; }
     /* square canvas that fits either orientation and always leaves room for controls */
     #stage, #game { width: min(100%, 78vh); }
     /* bigger, thumb-sized control targets */
-    #dpad { grid-template-columns: repeat(3, 56px); grid-template-rows: repeat(3, 56px); gap: 6px; }
-    #dpad button, #acts button { height: 56px; font-size: 18px; }
-    #acts { gap: 6px; }
-    #acts button { width: 84px; height: auto; min-height: 56px; }
+    #dpad { grid-template-columns: repeat(3, 64px); grid-template-rows: repeat(3, 64px); gap: 6px; }
+    #dpad button { height: 64px; font-size: 20px; }
     #seedInput { font-size: 16px; }          /* >=16px stops iOS auto-zoom on focus */
   }
 
@@ -110,13 +112,14 @@
     #stage     { flex: 0 0 auto; align-self: flex-start; }
     #stage, #game { width: min(52vw, 82vh); }
     #touch     { flex: 0 0 auto; margin: 0 0 0 12px; }
-    #msglog, #inv, #seedPanel, #helpPanel, #debugWrap { flex: 1 1 100%; }
+    #inv, #seedPanel, #helpPanel, #debugWrap { flex: 1 1 100%; }
   }
 </style>
 
 <div id="wrap">
   <div id="stage">
     <canvas id="game" width="704" height="704"></canvas>
+    <div id="msglog"></div>
     <div id="overlay"><div class="card" id="overlayCard"></div></div>
   </div>
   <div id="touch">
@@ -125,15 +128,11 @@
       <button data-dx="0"  data-dy="-1">↑</button>
       <button data-dx="1"  data-dy="-1">↗</button>
       <button data-dx="-1" data-dy="0">←</button>
-      <button data-dx="0"  data-dy="0" class="wait">•</button>
+      <button data-dx="0"  data-dy="0" id="interactBtn" data-mode="wait" title="pick up / descend / wait">•</button>
       <button data-dx="1"  data-dy="0">→</button>
       <button data-dx="-1" data-dy="1">↙</button>
       <button data-dx="0"  data-dy="1">↓</button>
       <button data-dx="1"  data-dy="1">↘</button>
-    </div>
-    <div id="acts">
-      <button data-act="pickup">get</button>
-      <button data-act="descend">&gt; down</button>
     </div>
   </div>
   <div id="side">
@@ -145,7 +144,6 @@
     </div>
     <div class="panel" id="hud"></div>
     <div class="panel" id="inv"></div>
-    <div class="panel" id="msglog"></div>
     <div class="panel" id="debugWrap">
       <div class="muted" style="margin-bottom:6px">Debug (?debug=1)</div>
       <div id="debugPanel" class="muted">disabled</div>
@@ -153,7 +151,8 @@
     <div class="panel muted" id="helpPanel" style="font-size:12px">
       Move: arrows / WASD / hjkl+yubn · wait: space or .<br>
       Pick up: g · use item: 1–8 (or tap a slot) · descend: &gt;<br>
-      Touch: on-screen pad appears on tablets/phones.<br>
+      Touch: on-screen pad appears on phones/tablets; its center button<br>
+      interacts — pick up / descend / wait, depending where you stand.<br>
       Share a run: append <code>?seed=</code> to the URL.
     </div>
   </div>
@@ -1912,6 +1911,7 @@ if (typeof document !== "undefined") {
 
   function renderSide() {
     renderHud();
+    updateInteractBtn();
     const el = document.getElementById("msglog");
     el.innerHTML = game.messages.map((m) => "<div>" + escapeHtml(m) + "</div>").join("");
     if (DEBUG) {
@@ -2134,14 +2134,25 @@ if (typeof document !== "undefined") {
   });
 
   /* --- Touch controls (shown on coarse pointers / small screens) ---------- */
+  // The center of the pad is a context-aware Interact: pick up an item here,
+  // descend if on the stairs, otherwise wait. updateInteractBtn() relabels it.
+  function doInteract() {
+    if (!game || game.gameOver) return;
+    if (RL.itemAt(game, game.player.x, game.player.y)) doPickup();
+    else if (onStairs()) doDescend();
+    else doMove(0, 0); // wait
+  }
+  function updateInteractBtn() {
+    const b = document.getElementById("interactBtn");
+    if (!b || !game) return;
+    if (RL.itemAt(game, game.player.x, game.player.y)) { b.dataset.mode = "get";  b.textContent = "get"; }
+    else if (onStairs())                              { b.dataset.mode = "down"; b.textContent = "↓"; }
+    else                                              { b.dataset.mode = "wait"; b.textContent = "•"; }
+  }
   document.getElementById("dpad").addEventListener("click", (e) => {
     const b = e.target.closest("button"); if (!b) return;
-    doMove(parseInt(b.dataset.dx, 10), parseInt(b.dataset.dy, 10));
-  });
-  document.getElementById("acts").addEventListener("click", (e) => {
-    const b = e.target.closest("button"); if (!b) return;
-    if (b.dataset.act === "pickup") doPickup();
-    else if (b.dataset.act === "descend") doDescend();
+    const dx = parseInt(b.dataset.dx, 10), dy = parseInt(b.dataset.dy, 10);
+    if (dx === 0 && dy === 0) doInteract(); else doMove(dx, dy);
   });
   // Tap an inventory slot to use it (delegated: survives innerHTML rewrites).
   document.getElementById("inv").addEventListener("click", (e) => {
