@@ -111,15 +111,19 @@
   #touch { display: none; margin-top: 10px; align-items: center; justify-content: center; gap: 12px;
       user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
   /* Quick-use consumable buttons flanking the pad — styled like the pad keys but
-     with a colored accent so a potion (green) / firebomb (red) reads at a glance.
-     A small count badge shows how many are carried. */
-  .actBtn { position: relative; height: 46px; min-width: 46px; padding: 0 6px; cursor: pointer;
-      font: 20px/1 ui-monospace, monospace; background: #161c28; border: 1px solid #2a3346;
+     with a colored accent so each item reads at a glance. Each side is a vertical
+     stack: potion + regen tonic (left), firebomb + blink scroll (right). A small
+     count badge shows how many are carried. */
+  .actCol { display: flex; flex-direction: column; gap: 4px; flex: 0 0 auto; }
+  .actBtn { position: relative; height: 40px; min-width: 40px; padding: 0 6px; cursor: pointer;
+      font: 18px/1 ui-monospace, monospace; background: #161c28; border: 1px solid #2a3346;
       border-radius: 6px; color: #c8d0dc; flex: 0 0 auto;
       touch-action: manipulation; -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
   .actBtn:active { background: #2a3346; }
-  #potionBtn { border-color: #2f6d4a; }
-  #bombBtn   { border-color: #7a3230; }
+  #potionBtn { border-color: #2f6d4a; }  /* heal — green   */
+  #regenBtn  { border-color: #6b3f8f; }  /* regen — purple */
+  #bombBtn   { border-color: #7a3230; }  /* firebomb — red */
+  #blinkBtn  { border-color: #2a5a66; }  /* blink — cyan   */
   .actBtn .cnt { position: absolute; top: -6px; right: -6px; min-width: 15px; height: 15px; padding: 0 3px;
       font: 10px/15px ui-monospace, monospace; text-align: center; color: #0b0e14;
       background: #c8d0dc; border-radius: 8px; }
@@ -163,7 +167,7 @@
     /* bigger, thumb-sized control targets */
     #dpad { grid-template-columns: repeat(3, 64px); grid-template-rows: repeat(3, 64px); gap: 6px; }
     #dpad button { height: 64px; font-size: 20px; }
-    .actBtn { height: 64px; min-width: 56px; font-size: 26px; }
+    .actBtn { height: 52px; min-width: 50px; font-size: 24px; }
     #seedInput { font-size: 16px; }          /* >=16px stops iOS auto-zoom on focus */
   }
 
@@ -186,8 +190,11 @@
     <div id="overlay"><div class="card" id="overlayCard"></div></div>
   </div>
   <div id="touch">
-    <!-- Quick-use consumable on the left of the pad; only shown when carried. -->
-    <button id="potionBtn" class="actBtn" title="quaff a potion" hidden></button>
+    <!-- Quick-use consumables on the left of the pad; each shown only when carried. -->
+    <div class="actCol">
+      <button id="potionBtn" class="actBtn" title="quaff a potion" hidden></button>
+      <button id="regenBtn"  class="actBtn" title="drink a regen tonic" hidden></button>
+    </div>
     <div id="dpad">
       <button data-dx="-1" data-dy="-1">↖</button>
       <button data-dx="0"  data-dy="-1">↑</button>
@@ -199,8 +206,11 @@
       <button data-dx="0"  data-dy="1">↓</button>
       <button data-dx="1"  data-dy="1">↘</button>
     </div>
-    <!-- Firebomb on the right, opposite the potion; only shown when carried. -->
-    <button id="bombBtn" class="actBtn" title="throw a firebomb" hidden></button>
+    <!-- Firebomb + blink scroll on the right, opposite the potions; each shown only when carried. -->
+    <div class="actCol">
+      <button id="bombBtn"  class="actBtn" title="throw a firebomb" hidden></button>
+      <button id="blinkBtn" class="actBtn" title="read a blink scroll" hidden></button>
+    </div>
   </div>
   <div id="side">
     <h1>SEEDED ROGUELIKE</h1>
@@ -2433,7 +2443,7 @@ if (typeof document !== "undefined") {
 
   // Bump this on every deploy — shown de-emphasised in the help panel so you can
   // confirm the home-screen app actually reloaded the latest build.
-  const APP_VERSION = "build 15 · 2026-09-04";
+  const APP_VERSION = "build 16 · 2026-09-04";
 
   let game;
   const debugState = { revealAll: false, flow: false };
@@ -3234,8 +3244,10 @@ if (typeof document !== "undefined") {
       btn.dataset.slot = slot;
       btn.innerHTML = glyph + (n > 1 ? `<span class="cnt">${n}</span>` : "");
     };
-    set(document.getElementById("potionBtn"), slotOfEffect("heal"), "🧪");
-    set(document.getElementById("bombBtn"),   slotOfEffect("area"), "💣");
+    set(document.getElementById("potionBtn"), slotOfEffect("heal"),  "🧪");
+    set(document.getElementById("regenBtn"),  slotOfEffect("regen"), "💗");
+    set(document.getElementById("bombBtn"),   slotOfEffect("area"),  "💣");
+    set(document.getElementById("blinkBtn"),  slotOfEffect("blink"), "🌀");
   }
   // Pointer-based dpad: a direction fires once on press and then auto-repeats
   // while held (like holding an arrow key); the center Interact is a single tap.
@@ -3267,7 +3279,7 @@ if (typeof document !== "undefined") {
   });
   // The pad-flanking quick-use buttons: each carries the target slot in a data-attr
   // refreshed every render. Use pointerdown (not click) to match the pad's feel.
-  for (const id of ["potionBtn", "bombBtn"]) {
+  for (const id of ["potionBtn", "regenBtn", "bombBtn", "blinkBtn"]) {
     document.getElementById(id).addEventListener("pointerdown", (e) => {
       e.preventDefault();
       const slot = e.currentTarget.dataset.slot;
