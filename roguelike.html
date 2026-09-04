@@ -488,6 +488,11 @@ const VAULT_LOOT = ["greataxe", "strong_potion", "strength_shard", "blink_scroll
 // the single weapon you carry one rung up this ladder (a "Fine Weapon" jumps you
 // straight to at least its tierMin). So every weapon you find is real progress
 // rather than a redundant Sword you'd never use.
+//
+// The `bonus` column is the shared MECHANICAL progression every class climbs. The
+// `name` is only the default flavor (the fists/no-class player); a class picks its
+// own name for each rung from its `weaponNames` family, so a Cleric's pickups make
+// a better Staff rather than swapping his staff out for an axe (see upgradeWeapon).
 const WEAPON_LADDER = [
   { name: "Rusty Axe",         bonus: 2 },
   { name: "Wood Axe",          bonus: 3 },
@@ -517,11 +522,17 @@ const DEFAULT_DIFFICULTY = "normal";
 // starting pack. Leaving classId null yields the original fists/30-HP player that
 // the headless tests and bots expect — the live game always picks one of these.
 const CLASSES = {
+  // `weaponNames` names each of the 5 WEAPON_LADDER rungs in this class's own
+  // weapon family. A weapon pickup climbs the shared bonus ladder but keeps the
+  // class's flavor — a Cleric's staff becomes a finer staff, never an axe.
   warrior: { id: "warrior", name: "Warrior", baseHp: 34, weaponName: "Battle Axe", weaponTier: 2, weaponBonus: 4, attackBonus: 0, reach: 1, startItems: [],
+             weaponNames: ["Rusty Axe", "Wood Axe", "Battle Axe", "Great Axe", "Pristine Greataxe"],
              blurb: "Axe · 34 HP · sturdy, hits hard up close" },
   cleric:  { id: "cleric",  name: "Cleric",  baseHp: 24, weaponName: "Staff",      weaponTier: 0, weaponBonus: 2, attackBonus: 0, reach: 2, startItems: ["healing_potion", "regen_tonic"],
+             weaponNames: ["Staff", "Oak Staff", "Blessed Staff", "War Staff", "Sacred Staff"],
              blurb: "Staff · 24 HP · strikes 1 tile away · frail, starts with heals" },
   rogue:   { id: "rogue",   name: "Rogue",   baseHp: 28, weaponName: "Daggers",    weaponTier: 0, weaponBonus: 2, attackBonus: 1, reach: 1, startItems: ["blink_scroll", "firebomb"],
+             weaponNames: ["Daggers", "Fine Daggers", "Twin Fangs", "Dancing Blades", "Shadow Fangs"],
              blurb: "Daggers · 28 HP · quick · starts with Blink + Firebomb" },
 };
 const DEFAULT_CLASS = "warrior";
@@ -1469,9 +1480,13 @@ function upgradeWeapon(g, tierMin = 0) {
   if (cur >= top) g.excessWeapons++;
   const next = Math.min(top, Math.max(cur + 1, tierMin));
   p.weaponTier = next;
-  const w = WEAPON_LADDER[next];
-  p.weaponBonus = w.bonus; p.weaponName = w.name;
-  return w;
+  const bonus = WEAPON_LADDER[next].bonus; // shared mechanical progression
+  // Name the new rung in the class's own weapon family so flavor is preserved
+  // (a Cleric climbs Staff → Sacred Staff, not into the default axe names).
+  const fam = g.classId && CLASSES[g.classId].weaponNames;
+  const name = fam ? fam[next] : WEAPON_LADDER[next].name;
+  p.weaponBonus = bonus; p.weaponName = name;
+  return { name, bonus };
 }
 
 function applyItem(g, defId) {
@@ -2525,17 +2540,23 @@ if (typeof document !== "undefined") {
   }
 
   // One-click seed share: copy a ready-to-play URL (seed + loadout) to the
-  // clipboard, degrading to a prompt() if the async clipboard API is unavailable.
+  // clipboard, degrading to a prompt() when the async clipboard API is
+  // unavailable. Every fallback is guarded — a locked-down environment (no
+  // clipboard write, no prompt) must never surface an uncaught rejection.
   function shareSeed(seed, cfg, btn) {
     const url = location.origin + location.pathname +
       "?seed=" + encodeURIComponent(seed) +
       (cfg && cfg.classId ? "&class=" + encodeURIComponent(cfg.classId) : "") +
       (cfg && cfg.difficulty ? "&diff=" + encodeURIComponent(cfg.difficulty) : "");
-    const flash = () => { if (btn) { const t = btn.textContent; btn.textContent = "Copied!"; setTimeout(() => { btn.textContent = t; }, 1200); } };
+    const flash = (label) => { if (btn) { const t = btn.textContent; btn.textContent = label; setTimeout(() => { btn.textContent = t; }, 1200); } };
+    const manual = () => { try { window.prompt("Copy this run link:", url); } catch (_) { flash("Copy failed"); } };
     try {
-      if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(url).then(flash, () => window.prompt("Copy this run link:", url)); return; }
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(url).then(() => flash("Copied!"), manual);
+        return;
+      }
     } catch (_) {}
-    window.prompt("Copy this run link:", url);
+    manual();
   }
 
   // The Runs panel: a per-difficulty campaign leaderboard (default board = the
