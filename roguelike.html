@@ -115,13 +115,16 @@
      stack: potion + regen tonic (left), firebomb + blink scroll (right). A small
      count badge shows how many are carried. */
   .actCol { display: flex; flex-direction: column; gap: 4px; flex: 0 0 auto; }
-  .actBtn { position: relative; height: 40px; min-width: 40px; padding: 0 6px; cursor: pointer;
+  .actBtn { position: relative; display: flex; align-items: center; justify-content: center;
+      height: 40px; min-width: 40px; padding: 0 6px; cursor: pointer;
       font: 18px/1 ui-monospace, monospace; background: #161c28; border: 1px solid #2a3346;
       border-radius: 6px; color: #c8d0dc; flex: 0 0 auto;
       touch-action: manipulation; -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
   .actBtn:active { background: #2a3346; }
+  .actBtn[hidden] { display: none; }  /* flex above would otherwise defeat the hidden attribute */
+  .actBtn svg { width: 1.7em; height: 1.7em; display: block; pointer-events: none; }
   #potionBtn { border-color: #2f6d4a; }  /* heal — green   */
-  #regenBtn  { border-color: #6b3f8f; }  /* regen — purple */
+  #regenBtn  { border-color: #6b3f8f; }  /* regen — pink flask icon */
   #bombBtn   { border-color: #7a3230; }  /* firebomb — red */
   #blinkBtn  { border-color: #2a5a66; }  /* blink — cyan   */
   .actBtn .cnt { position: absolute; top: -6px; right: -6px; min-width: 15px; height: 15px; padding: 0 3px;
@@ -2443,7 +2446,7 @@ if (typeof document !== "undefined") {
 
   // Bump this on every deploy — shown de-emphasised in the help panel so you can
   // confirm the home-screen app actually reloaded the latest build.
-  const APP_VERSION = "build 16 · 2026-09-04";
+  const APP_VERSION = "build 17 · 2026-09-04";
 
   let game;
   const debugState = { revealAll: false, flow: false };
@@ -3232,9 +3235,31 @@ if (typeof document !== "undefined") {
     if (!game) return -1;
     return game.inventory.findIndex((s) => RL.ITEM_DEFS[s.defId].effect.type === type);
   }
-  // Show/hide the potion & firebomb quick-use buttons beside the pad, labelling each
-  // with its glyph and a count badge. Hidden entirely when none of that item is
-  // carried, so the buttons only appear when there's something to press.
+  // A little pink potion flask (inline SVG) for the regen tonic button — a conical
+  // flask of pink liquid, cork, and a sparkle, so it reads as a magic tonic rather
+  // than a plain heart. Kept tiny (24-unit viewBox) since it renders at ~30px.
+  const REGEN_ICON =
+    '<svg viewBox="0 0 24 24" aria-hidden="true">' +
+      // sparkles
+      '<path d="M3.6 1.3c.3 1.7.6 2 2.3 2.3-1.7.3-2 .6-2.3 2.3-.3-1.7-.6-2-2.3-2.3 1.7-.3 2-.6 2.3-2.3z" fill="#ffe15a"/>' +
+      '<path d="M20.4 6c.2 1.1.4 1.3 1.5 1.5-1.1.2-1.3.4-1.5 1.5-.2-1.1-.4-1.3-1.5-1.5 1.1-.2 1.3-.4 1.5-1.5z" fill="#ffe15a"/>' +
+      // liquid + glass, clipped to the flask body
+      '<defs><clipPath id="rgflask"><path d="M9.8 7.2 9.8 9.4 5.2 19.1c-.6 1.3.3 2.8 1.8 2.8h10c1.5 0 2.4-1.5 1.8-2.8L14.2 9.4 14.2 7.2z"/></clipPath></defs>' +
+      '<g clip-path="url(#rgflask)">' +
+        '<rect x="0" y="0" width="24" height="24" fill="#f6f8fb"/>' +
+        '<rect x="0" y="12.6" width="24" height="12" fill="#ff6fa5"/>' +
+        '<rect x="0" y="12.6" width="24" height="1.8" fill="#ffb3d4"/>' +
+        '<rect x="7" y="11" width="1.4" height="9" rx=".7" fill="#ffffff" opacity=".55"/>' +
+      '</g>' +
+      // flask outline
+      '<path d="M9.8 7.2 9.8 9.4 5.2 19.1c-.6 1.3.3 2.8 1.8 2.8h10c1.5 0 2.4-1.5 1.8-2.8L14.2 9.4 14.2 7.2z" fill="none" stroke="#1a1a1a" stroke-width="1.1" stroke-linejoin="round"/>' +
+      // collar + cork
+      '<rect x="8.4" y="4.4" width="7.2" height="2.9" rx=".7" fill="#e8edf2" stroke="#1a1a1a" stroke-width="1"/>' +
+      '<rect x="9.4" y="1.9" width="5.2" height="2.9" rx=".7" fill="#e08a5a" stroke="#1a1a1a" stroke-width="1"/>' +
+    '</svg>';
+  // Show/hide the quick-use buttons beside the pad, labelling each with its glyph (or
+  // icon) and a count badge. Hidden entirely when none of that item is carried, so the
+  // buttons only appear when there's something to press.
   function updateActionBtns() {
     const set = (btn, slot, glyph) => {
       if (!btn) return;
@@ -3245,7 +3270,7 @@ if (typeof document !== "undefined") {
       btn.innerHTML = glyph + (n > 1 ? `<span class="cnt">${n}</span>` : "");
     };
     set(document.getElementById("potionBtn"), slotOfEffect("heal"),  "🧪");
-    set(document.getElementById("regenBtn"),  slotOfEffect("regen"), "💗");
+    set(document.getElementById("regenBtn"),  slotOfEffect("regen"), REGEN_ICON);
     set(document.getElementById("bombBtn"),   slotOfEffect("area"),  "💣");
     set(document.getElementById("blinkBtn"),  slotOfEffect("blink"), "🌀");
   }
