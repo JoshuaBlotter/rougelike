@@ -2777,11 +2777,12 @@ if (typeof document !== "undefined") {
     updateInteractBtn();
     const el = document.getElementById("msglog");
     // Show the last few lines, fading older ones so the overlay stays see-through
-    // (you can read the map/player under it) with only the newest line at full strength.
-    const msgs = game.messages.slice(-4);
+    // (you can read the map/player under it). Even the newest line is kept below
+    // full strength so terrain/entities behind the text remain legible.
+    const msgs = game.messages.slice(-3);
     el.innerHTML = msgs.map((m, i) => {
       const age = msgs.length - 1 - i;                 // 0 = newest
-      const op = Math.max(0.28, 1 - age * 0.26);
+      const op = Math.max(0.2, 0.8 - age * 0.28);
       return `<div style="opacity:${op.toFixed(2)};color:${msgColor(m)}">${escapeHtml(m)}</div>`;
     }).join("");
     if (DEBUG) {
@@ -2908,6 +2909,18 @@ if (typeof document !== "undefined") {
     // (memory fades each step), Normal keeps remembered terrain. Entities are still
     // only ever drawn where currently visible, in every mode.
     const mapReveal = (DIFFICULTIES[game.difficulty] || DIFFICULTIES.normal).mapReveal;
+    // Hard fog ("current") shows only the lit disc around the player, which would
+    // otherwise be a small island in a big black frame. Zoom the world in and pin
+    // the (interpolated) player to canvas centre so the visible area fills the view
+    // and scrolls with you. Render-only: it's a ctx transform composed under the
+    // shake, so it never touches the sim. Other modes keep the whole-map view.
+    if (mapReveal === "current") {
+      const CAM_ZOOM = 2;
+      const [ppx0, ppy0] = actorPix("p", game.player.x, game.player.y);
+      const pcx = ppx0 + CELL / 2, pcy = ppy0 + CELL / 2; // player pixel centre
+      ctx.translate(canvas.width / 2 - pcx * CAM_ZOOM, canvas.height / 2 - pcy * CAM_ZOOM);
+      ctx.scale(CAM_ZOOM, CAM_ZOOM);
+    }
     // Pick the biome palette for this floor's depth band; boss floors get the
     // darker variant. Props are the cosmetic decoration layer, drawn under all
     // entities. Both are render-only.
