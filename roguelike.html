@@ -188,7 +188,7 @@
     <h1>SEEDED ROGUELIKE</h1>
     <div class="panel" id="seedPanel">
       <div class="muted">seed</div>
-      <div class="row"><input id="seedInput" spellcheck="false"><button id="seedGo">New run</button><button id="dailyGo" title="today's shared dungeon (same for everyone, UTC)">Daily run</button><button id="setupBtn" title="choose class & difficulty">⚙</button><button id="soundBtn" title="toggle sound">🔊</button></div>
+      <div class="row"><input id="seedInput" spellcheck="false"><button id="seedGo">New run</button><button id="dailyGo" title="today's shared dungeon (same for everyone, UTC)">Daily run</button><button id="copyLinkBtn" title="copy a shareable link to this run">🔗</button><button id="setupBtn" title="choose class & difficulty">⚙</button><button id="soundBtn" title="toggle sound">🔊</button></div>
       <div class="muted">Current: <code id="seedShow">—</code> · <span id="loadoutShow"></span>depth <span id="depthShow">1</span></div>
     </div>
     <div class="panel" id="hud"></div>
@@ -2539,24 +2539,65 @@ if (typeof document !== "undefined") {
     return g._recordInfo;
   }
 
-  // One-click seed share: copy a ready-to-play URL (seed + loadout) to the
-  // clipboard, degrading to a prompt() when the async clipboard API is
-  // unavailable. Every fallback is guarded — a locked-down environment (no
-  // clipboard write, no prompt) must never surface an uncaught rejection.
-  function shareSeed(seed, cfg, btn) {
-    const url = location.origin + location.pathname +
+  // The ready-to-play URL for a run: seed + loadout, so a shared or refreshed
+  // link reproduces the exact dungeon AND the class/difficulty. One builder feeds
+  // both the share buttons and the address-bar sync below, so they can't drift.
+  function runUrl(seed, cfg) {
+    return location.origin + location.pathname +
       "?seed=" + encodeURIComponent(seed) +
       (cfg && cfg.classId ? "&class=" + encodeURIComponent(cfg.classId) : "") +
       (cfg && cfg.difficulty ? "&diff=" + encodeURIComponent(cfg.difficulty) : "");
-    const flash = (label) => { if (btn) { const t = btn.textContent; btn.textContent = label; setTimeout(() => { btn.textContent = t; }, 1200); } };
-    const manual = () => { try { window.prompt("Copy this run link:", url); } catch (_) { flash("Copy failed"); } };
+  }
+  // Keep the address bar's ?seed= (and loadout) matched to the live run, so a
+  // refresh or a copied URL reproduces it with no hand-editing. replaceState (not
+  // pushState) updates the URL without spamming the back-button history, and is
+  // wrapped so a sandboxed/file: context that forbids it never breaks the run.
+  function syncUrl(g) {
+    if (!g) return;
+    try { history.replaceState(null, "", runUrl(g.seed, { classId: g.classId, difficulty: g.difficulty })); } catch (_) {}
+  }
+  // Flash a transient label on a share button, then restore its resting text.
+  // The resting label lives in a dataset so repeated clicks inside the 1.2s
+  // window restore the real text, not a captured "Copied!".
+  function flashBtn(btn, label) {
+    if (!btn) return;
+    if (btn.dataset.label == null) btn.dataset.label = btn.textContent;
+    btn.textContent = label;
+    clearTimeout(btn._flashT);
+    btn._flashT = setTimeout(() => { btn.textContent = btn.dataset.label; delete btn.dataset.label; }, 1200);
+  }
+  // Copy a URL to the clipboard, degrading to a prompt() the player can copy from
+  // when the async clipboard API is blocked (insecure origin, denied permission).
+  // Every fallback is guarded — a locked-down environment (no clipboard write, no
+  // prompt) must never surface an uncaught rejection; it shows "Copy failed".
+  function copyUrl(url, btn) {
+    const manual = () => {
+      try { window.prompt("Copy this run link:", url); }
+      catch (_) { flashBtn(btn, "Copy failed"); }
+    };
     try {
       if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(url).then(() => flash("Copied!"), manual);
+        navigator.clipboard.writeText(url).then(() => flashBtn(btn, "Copied!"), manual);
         return;
       }
     } catch (_) {}
     manual();
+  }
+  // One-click seed share. On a coarse-pointer device with the Web Share sheet,
+  // fire that first (one tap to send a run to a friend); otherwise — and if the
+  // share is dismissed/unsupported — fall back to copying the link.
+  function shareSeed(seed, cfg, btn) {
+    const url = runUrl(seed, cfg);
+    let coarse = false;
+    try { coarse = !!(window.matchMedia && window.matchMedia("(pointer: coarse)").matches); } catch (_) {}
+    if (coarse && navigator.share) {
+      // Payload is just the seed URL (the receiver plays it); a beaten-run score
+      // line could be appended here later without changing the reproduce path.
+      navigator.share({ title: "Seeded Roguelike", text: "Play my run:", url })
+        .catch(() => copyUrl(url, btn)); // user cancelled or share failed → copy
+      return;
+    }
+    copyUrl(url, btn);
   }
 
   // The Runs panel: a per-difficulty campaign leaderboard (default board = the
@@ -2657,6 +2698,7 @@ if (typeof document !== "undefined") {
     document.getElementById("seedShow").textContent = game.seed;
     document.getElementById("depthShow").textContent = game.depth;
     updateLoadoutShow();
+    syncUrl(game); // address bar now reproduces this exact run on refresh/copy
     const who = CLASSES[game.classId] ? CLASSES[game.classId].name : "adventurer";
     game.messages = ["Welcome, " + who + ". Seed: " + game.seed +
       (game.isDaily ? " (daily " + game.dailyDate + " — same for everyone)" : "")];
@@ -3013,6 +3055,7 @@ if (typeof document !== "undefined") {
   // a boss floor, and end the run if the arrival somehow killed the player.
   function onNewFloor(msg) {
     document.getElementById("depthShow").textContent = game.depth;
+    syncUrl(game); // keep ?seed= correct across descend (seed is stable per run)
     note(msg);
     if (RL.isBossFloor(game.depth)) {
       const b = RL.ENEMY_TYPES[RL.bossForDepth(game.depth)];
@@ -3167,6 +3210,14 @@ if (typeof document !== "undefined") {
   // the daily is always the daily. newRun echoes the resolved seed into the box
   // and the "Current:" line, so the player sees exactly what to share.
   document.getElementById("dailyGo").onclick = () => newRun(API.dailySeed());
+  // Copy-link button in the run chrome: share the live run, or — before a run has
+  // begun — whatever seed+loadout is queued in the box. shareSeed prefers the Web
+  // Share sheet on touch and falls back to copying the link.
+  document.getElementById("copyLinkBtn").onclick = (e) => {
+    const seed = (game && game.seed) || document.getElementById("seedInput").value.trim() || pickSeed();
+    const cfg = game ? { classId: game.classId, difficulty: game.difficulty } : runConfig;
+    shareSeed(seed, cfg, e.currentTarget);
+  };
   document.getElementById("seedInput").addEventListener("keydown", (e) => {
     if (e.key === "Enter") document.getElementById("seedGo").click();
   });
