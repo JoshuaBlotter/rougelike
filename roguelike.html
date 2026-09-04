@@ -254,6 +254,7 @@
         Locked doors (brown +) open by walking into them with a key.<br>
         Loadout: pick class &amp; difficulty at the start (⚙ to change).<br>
         Cleric's staff strikes an enemy one tile away — press toward it.<br>
+        Rogue sneaks (enemies spot it late) &amp; picks 2 locks — no key needed.<br>
         Touch: on-screen pad appears on phones/tablets; its center button<br>
         interacts — pick up / descend / wait, depending where you stand.<br>
         Phone: use Share → <b>Add to Home Screen</b> to play fullscreen.<br>
@@ -582,8 +583,9 @@ const CLASSES = {
              weaponNames: ["Staff", "Oak Staff", "Blessed Staff", "War Staff", "Sacred Staff"],
              blurb: "Staff · 24 HP · strikes 1 tile away · frail, starts with heals" },
   rogue:   { id: "rogue",   name: "Rogue",   baseHp: 28, weaponName: "Daggers",    weaponTier: 0, weaponBonus: 2, attackBonus: 1, reach: 1, startItems: ["blink_scroll", "firebomb"],
+             lockpicks: 2, sightMul: 0.55,
              weaponNames: ["Daggers", "Fine Daggers", "Twin Fangs", "Dancing Blades", "Shadow Fangs"],
-             blurb: "Daggers · 28 HP · quick · starts with Blink + Firebomb" },
+             blurb: "Daggers · 28 HP · sneaks (enemies spot it late) · picks 2 locks · Blink + Firebomb" },
 };
 const DEFAULT_CLASS = "warrior";
 
@@ -1078,9 +1080,11 @@ function createGame(seedString, depth = 1, opts = {}) {
       x: floor.spawn.x, y: floor.spawn.y, prevX: floor.spawn.x, prevY: floor.spawn.y,
       hp: PLAYER_HP, maxHp: PLAYER_HP, speed: PLAYER_SPEED, energy: 0, alive: true,
       weaponBonus: 0, weaponName: "fists", weaponTier: -1, attackBonus: 0, regen: 0, reach: 1,
+      sightMul: 1,   // enemy sight range is scaled by this against the player (Rogue < 1 = stealth)
     },
     inventory: [],   // [{ defId, count }]
     keys: 0,         // carried keys (open locked doors); not an inventory slot
+    lockpicks: 0,    // Rogue's finite lock picks: open a locked door with no key, spent first
     turn: 0, ticks: 0, kills: 0, itemsFound: 0, gameOver: false, overReason: null,
     // Score inputs (Milestone 10). excessWeapons/excessShards count "margin" pickups
     // that moved nothing (already Pristine / already at MAX_ATTACK_BONUS) — a minor
@@ -1116,6 +1120,8 @@ function applyClass(g, classId) {
   p.weaponName = c.weaponName; p.weaponTier = c.weaponTier; p.weaponBonus = c.weaponBonus;
   p.attackBonus = c.attackBonus || 0;
   p.reach = c.reach || 1;
+  p.sightMul = c.sightMul || 1;      // Rogue < 1: enemies notice it from closer in
+  g.lockpicks = c.lockpicks || 0;    // Rogue's starting lock picks
   for (const defId of c.startItems || []) addToInventory(g, defId);
 }
 
@@ -1136,8 +1142,10 @@ function descend(g) {
   p.hp = Math.min(p.maxHp, Math.max(o.hp + 8, Math.floor(p.maxHp * 0.65)));
   p.weaponBonus = o.weaponBonus; p.weaponName = o.weaponName; p.weaponTier = o.weaponTier;
   p.attackBonus = o.attackBonus; p.regen = o.regen; p.reach = o.reach; p.energy = 0; p.alive = true;
+  p.sightMul = o.sightMul; // stealth is a class trait, carried the whole run
   next.inventory = g.inventory.map((s) => ({ ...s }));
   next.keys = g.keys; // keys carry down (a spare opens the next floor's vault early)
+  next.lockpicks = g.lockpicks; // unused picks carry down too
   next.turn = g.turn; next.kills = g.kills; next.itemsFound = g.itemsFound;
   next.excessWeapons = g.excessWeapons; next.excessShards = g.excessShards; // score counters carry the whole run
   next.endless = g.endless;
@@ -1304,7 +1312,11 @@ function hasLOS(tiles, x0, y0, x1, y1) {
 function enemySees(g, e) {
   const t = ENEMY_TYPES[e.typeId];
   const dx = g.player.x - e.x, dy = g.player.y - e.y;
-  if (dx * dx + dy * dy > t.sight * t.sight) return false;
+  // Effective sight is scaled by the player's stealth (Rogue's sightMul < 1 shrinks
+  // every enemy's detection radius against it — alerting, re-locking and archer fire
+  // all key off this one test, so the Rogue slips closer before anything notices).
+  const range = t.sight * (g.player.sightMul || 1);
+  if (dx * dx + dy * dy > range * range) return false;
   return hasLOS(g.tiles, e.x, e.y, g.player.x, g.player.y);
 }
 
@@ -1666,14 +1678,17 @@ function playerMove(g, dx, dy) {
     const far = g.enemies.find((e) => e.alive && e.x === bx && e.y === by);
     if (far) { attack(g, g.player, far, "strikes"); endPlayerAction(g); return true; }
   }
-  // A locked door: spend a key to open it (and step through), else it blocks.
+  // A locked door: spend a key to open it (and step through), else it blocks. The
+  // Rogue can instead pick the lock — picks are spent first so found keys are kept
+  // (they carry down and score at run end), reinforcing "the Rogue doesn't need keys."
   if (inBounds(nx, ny) && g.tiles[idx(nx, ny)] === TILE.DOOR) {
-    if (g.keys > 0) {
-      g.keys--;
+    if (g.lockpicks > 0 || g.keys > 0) {
+      const picked = g.lockpicks > 0;
+      if (picked) g.lockpicks--; else g.keys--;
       g.tiles[idx(nx, ny)] = TILE.FLOOR;   // unlocked — the door tile is now floor
       g.flow = null; g.flowFrom = -1;      // terrain changed: drop the cached flow field
       g._sfCache = new Map();              // and the search-field cache
-      pushMsg(g, "You unlock the door.");
+      pushMsg(g, picked ? "You pick the lock." : "You unlock the door.");
       tryMovePlayer(g, dx, dy);            // step through in the same turn
       endPlayerAction(g);
       return true;
@@ -2466,7 +2481,7 @@ if (typeof document !== "undefined") {
 
   // Bump this on every deploy — shown de-emphasised in the help panel so you can
   // confirm the home-screen app actually reloaded the latest build.
-  const APP_VERSION = "build 19 · 2026-09-04";
+  const APP_VERSION = "build 20 · 2026-09-04";
 
   let game;
   const debugState = { revealAll: false, flow: false };
@@ -2817,6 +2832,7 @@ if (typeof document !== "undefined") {
       `<div class="muted">atk ${4 + p.weaponBonus + p.attackBonus} · ${escapeHtml(p.weaponName)}` +
       (p.regen > 0 ? ` · regen ${p.regen}` : "") +
       (game.keys > 0 ? ` · <span style="color:#ffe066">🔑${game.keys}</span>` : "") +
+      (game.lockpicks > 0 ? ` · <span style="color:#b197fc" title="lock picks — open a locked door without a key">⛏${game.lockpicks}</span>` : "") +
       ` · d${game.depth}${game.endless ? "∞" : "/" + RL.FINAL_DEPTH} · t${game.turn} · k${game.kills}${bossBadge}</div>` +
       (game.gameOver && !game.won ? `<div class="dead">YOU DIED — press New run</div>` : "");
 
