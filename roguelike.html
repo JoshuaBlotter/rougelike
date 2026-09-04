@@ -108,8 +108,21 @@
 
   /* touch controls — shown on coarse pointers / small screens only. The center
      button is a context-aware Interact: pick up / descend / wait, self-labelling. */
-  #touch { display: none; margin-top: 10px; align-items: center; justify-content: center;
+  #touch { display: none; margin-top: 10px; align-items: center; justify-content: center; gap: 12px;
       user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+  /* Quick-use consumable buttons flanking the pad — styled like the pad keys but
+     with a colored accent so a potion (green) / firebomb (red) reads at a glance.
+     A small count badge shows how many are carried. */
+  .actBtn { position: relative; height: 46px; min-width: 46px; padding: 0 6px; cursor: pointer;
+      font: 20px/1 ui-monospace, monospace; background: #161c28; border: 1px solid #2a3346;
+      border-radius: 6px; color: #c8d0dc; flex: 0 0 auto;
+      touch-action: manipulation; -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+  .actBtn:active { background: #2a3346; }
+  #potionBtn { border-color: #2f6d4a; }
+  #bombBtn   { border-color: #7a3230; }
+  .actBtn .cnt { position: absolute; top: -6px; right: -6px; min-width: 15px; height: 15px; padding: 0 3px;
+      font: 10px/15px ui-monospace, monospace; text-align: center; color: #0b0e14;
+      background: #c8d0dc; border-radius: 8px; }
   #dpad { display: grid; grid-template-columns: repeat(3, 46px); grid-template-rows: repeat(3, 46px); gap: 4px; }
   /* touch-action:none + callout:none so a HELD button repeats a move instead of
      triggering iOS's long-press selection / magnifier / context menu. */
@@ -150,6 +163,7 @@
     /* bigger, thumb-sized control targets */
     #dpad { grid-template-columns: repeat(3, 64px); grid-template-rows: repeat(3, 64px); gap: 6px; }
     #dpad button { height: 64px; font-size: 20px; }
+    .actBtn { height: 64px; min-width: 56px; font-size: 26px; }
     #seedInput { font-size: 16px; }          /* >=16px stops iOS auto-zoom on focus */
   }
 
@@ -172,6 +186,8 @@
     <div id="overlay"><div class="card" id="overlayCard"></div></div>
   </div>
   <div id="touch">
+    <!-- Quick-use consumable on the left of the pad; only shown when carried. -->
+    <button id="potionBtn" class="actBtn" title="quaff a potion" hidden></button>
     <div id="dpad">
       <button data-dx="-1" data-dy="-1">↖</button>
       <button data-dx="0"  data-dy="-1">↑</button>
@@ -183,6 +199,8 @@
       <button data-dx="0"  data-dy="1">↓</button>
       <button data-dx="1"  data-dy="1">↘</button>
     </div>
+    <!-- Firebomb on the right, opposite the potion; only shown when carried. -->
+    <button id="bombBtn" class="actBtn" title="throw a firebomb" hidden></button>
   </div>
   <div id="side">
     <h1>SEEDED ROGUELIKE</h1>
@@ -1547,11 +1565,15 @@ function doFirebomb(g, radius, damage) {
     if (d < bestD) { bestD = d; target = e; }
   }
   if (!target) { pushMsg(g, "The firebomb bursts on empty stone."); return; }
+  // Enemy HP climbs with depth (enemyHpScale), so a flat blast would fall behind
+  // and stop one-shotting the clusters — archers especially — it's meant to clear.
+  // Scale the blast by the same curve so a firebomb keeps its bite deeper in.
+  const dmg = Math.max(1, Math.round(damage * enemyHpScale(g.depth)));
   let hit = 0;
   for (const e of g.enemies) {
     if (!e.alive) continue;
     if (Math.max(Math.abs(e.x - target.x), Math.abs(e.y - target.y)) <= radius) {
-      e.hp -= damage; hit++;
+      e.hp -= dmg; hit++;
       if (e.hp <= 0) { e.alive = false; g.kills++; dropBossLoot(g, e); }
     }
   }
@@ -1651,6 +1673,16 @@ function playerPickup(g) {
     g.items = g.items.filter((o) => o !== it);
     g.itemsFound++;
     pushMsg(g, `Your weapon becomes a ${w.name} (+${w.bonus}).`);
+    endPlayerAction(g);
+    return true;
+  }
+  // Upgrades (strength shards) are permanent power with no decision to make — a
+  // competent player always banks them — so they apply on pickup rather than
+  // sitting in a slot waiting to be clicked. applyItem handles the at-cap overflow.
+  if (def.kind === "upgrade") {
+    applyItem(g, it.defId);
+    g.items = g.items.filter((o) => o !== it);
+    g.itemsFound++;
     endPlayerAction(g);
     return true;
   }
@@ -1995,9 +2027,8 @@ function competentBot(seed) {
     const adj = g.enemies.filter((e) => e.alive && cheby(e) === 1);
     const near = g.enemies.filter((e) => e.alive && cheby(e) <= 3);
 
-    // A competent player banks permanent power: strength shards get used on sight.
-    const slotStr = g.inventory.findIndex((s) => ITEM_DEFS[s.defId].effect.type === "strength");
-    if (slotStr >= 0 && !adj.length) { usePlayerItem(g, slotStr); continue; }
+    // (Strength shards are permanent power that now applies on pickup, so there's
+    // no in-inventory shard for the bot to use — banking them is automatic.)
     // Top off before a boss floor's fight rather than walking in wounded.
     const bossPrep = RL.isBossFloor(g.depth) && p.hp <= Math.floor(p.maxHp * 0.75);
     if ((p.hp <= Math.floor(p.maxHp * 0.5) || (bossPrep && near.length)) && slotOfHeal() >= 0) { usePlayerItem(g, slotOfHeal()); continue; }
@@ -2402,7 +2433,7 @@ if (typeof document !== "undefined") {
 
   // Bump this on every deploy — shown de-emphasised in the help panel so you can
   // confirm the home-screen app actually reloaded the latest build.
-  const APP_VERSION = "build 14 · 2026-09-04";
+  const APP_VERSION = "build 15 · 2026-09-04";
 
   let game;
   const debugState = { revealAll: false, flow: false };
@@ -2775,6 +2806,7 @@ if (typeof document !== "undefined") {
   function renderSide() {
     renderHud();
     updateInteractBtn();
+    updateActionBtns();
     const el = document.getElementById("msglog");
     // Show the last few lines, fading older ones so the overlay stays see-through
     // (you can read the map/player under it). Even the newest line is kept below
@@ -3185,6 +3217,26 @@ if (typeof document !== "undefined") {
     else if (onStairs())                              { b.dataset.mode = "down"; b.textContent = "↓"; }
     else                                              { b.dataset.mode = "wait"; b.textContent = "•"; }
   }
+  // First inventory slot whose item has the given effect type (-1 if none carried).
+  function slotOfEffect(type) {
+    if (!game) return -1;
+    return game.inventory.findIndex((s) => RL.ITEM_DEFS[s.defId].effect.type === type);
+  }
+  // Show/hide the potion & firebomb quick-use buttons beside the pad, labelling each
+  // with its glyph and a count badge. Hidden entirely when none of that item is
+  // carried, so the buttons only appear when there's something to press.
+  function updateActionBtns() {
+    const set = (btn, slot, glyph) => {
+      if (!btn) return;
+      if (slot < 0 || game.gameOver) { btn.hidden = true; btn.dataset.slot = ""; return; }
+      const n = game.inventory[slot].count;
+      btn.hidden = false;
+      btn.dataset.slot = slot;
+      btn.innerHTML = glyph + (n > 1 ? `<span class="cnt">${n}</span>` : "");
+    };
+    set(document.getElementById("potionBtn"), slotOfEffect("heal"), "🧪");
+    set(document.getElementById("bombBtn"),   slotOfEffect("area"), "💣");
+  }
   // Pointer-based dpad: a direction fires once on press and then auto-repeats
   // while held (like holding an arrow key); the center Interact is a single tap.
   // Using pointer events + preventDefault also stops iOS's long-press callout.
@@ -3213,6 +3265,15 @@ if (typeof document !== "undefined") {
     const s = e.target.closest(".slot"); if (!s || s.dataset.slot == null) return;
     doUse(parseInt(s.dataset.slot, 10));
   });
+  // The pad-flanking quick-use buttons: each carries the target slot in a data-attr
+  // refreshed every render. Use pointerdown (not click) to match the pad's feel.
+  for (const id of ["potionBtn", "bombBtn"]) {
+    document.getElementById(id).addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      const slot = e.currentTarget.dataset.slot;
+      if (slot !== "" && slot != null) doUse(parseInt(slot, 10));
+    });
+  }
 
   /* --- Seed + sound controls --------------------------------------------- */
   document.getElementById("seedGo").onclick = () => {
