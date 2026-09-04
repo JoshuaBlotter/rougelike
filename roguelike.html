@@ -89,8 +89,20 @@
   .card .scoreBig .scoreLbl { font-size: 13px; color: #6b7688; font-weight: normal; letter-spacing: 0; }
   .card .pbBadge { color: #ffd43b; font-weight: bold; letter-spacing: 1px; font-size: 12px; margin-bottom: 8px; }
 
-  /* Runs panel: recent-runs leaderboard, defaulting to the current difficulty. */
-  #runsPanel .runsHead { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+  /* Menu: one button reveals a panel with three switchable pages (seed / history
+     / how-to), so the seldom-touched chrome stays out of the way during play. */
+  #menuBtn { display: block; margin-bottom: 12px; padding: 8px 12px; cursor: pointer;
+      background: #10141c; border: 1px solid #1c2230; border-radius: 6px; color: #c8d0dc;
+      font-size: 13px; text-align: left; }
+  #menuBtn:hover { background: #161c28; }
+  #menuTabs { display: flex; gap: 6px; margin-bottom: 10px; }
+  #menuTabs button { flex: 1; padding: 6px 4px; cursor: pointer; font-size: 12px;
+      background: #0c1017; border: 1px solid #1c2230; border-radius: 6px; color: #8a94a6; }
+  #menuTabs button.sel { color: #c8d0dc; border-color: #2f4a6d; background: #161c28; }
+  .menuPage[hidden] { display: none; }
+
+  /* Runs page: recent-runs leaderboard, defaulting to the current difficulty. */
+  .runsHead { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
   #runsFilter button { font-size: 11px; padding: 2px 6px; margin-left: 3px; }
   #runsFilter button.sel { border-color: #2f6d4a; background: #16241c; color: #8ef0a0; }
   #runsStat { font-size: 11px; margin-bottom: 6px; }
@@ -158,10 +170,9 @@
     #hud       { order: 2; margin: 0; padding: 6px 10px; }   /* slim status strip */
     #touch     { order: 3; margin: 4px 0; }
     #inv       { order: 4; margin: 0; }
-    #seedPanel { order: 5; margin: 0; }
-    #runsPanel { order: 6; margin: 0; }
-    #helpPanel { order: 7; margin: 0; }
-    #debugWrap { order: 8; margin: 0; }
+    #menuBtn   { order: 5; margin: 0; }
+    #menuPanel { order: 6; margin: 0; }
+    #debugWrap { order: 7; margin: 0; }
     #hud .hpbar { margin: 0 0 4px; }
     /* square canvas that fits either orientation and always leaves room for controls.
        dvh tracks the *visible* viewport, so it fits even while Safari shows its bar. */
@@ -182,7 +193,7 @@
     #stage, #game { width: min(52vw, 82vh); }
     #stage, #game { width: min(52vw, 82dvh); }
     #touch     { order: 3; flex: 0 0 auto; margin: 0 0 0 12px; }
-    #inv, #seedPanel, #runsPanel, #helpPanel, #debugWrap { order: 4; flex: 1 1 100%; }
+    #inv, #menuBtn, #menuPanel, #debugWrap { order: 4; flex: 1 1 100%; }
   }
 </style>
 
@@ -217,36 +228,44 @@
   </div>
   <div id="side">
     <h1>SEEDED ROGUELIKE</h1>
-    <div class="panel" id="seedPanel">
-      <div class="muted">seed</div>
-      <div class="row"><input id="seedInput" spellcheck="false"><button id="seedGo">New run</button><button id="dailyGo" title="today's shared dungeon (same for everyone, UTC)">Daily run</button><button id="copyLinkBtn" title="copy a shareable link to this run">🔗</button><button id="setupBtn" title="choose class & difficulty">⚙</button><button id="soundBtn" title="toggle sound">🔊</button></div>
-      <div class="muted">Current: <code id="seedShow">—</code> · <span id="loadoutShow"></span>depth <span id="depthShow">1</span></div>
+    <button id="menuBtn" aria-expanded="false" aria-controls="menuPanel" title="Seed, history & how-to">☰ Menu</button>
+    <div class="panel" id="menuPanel" hidden>
+      <div id="menuTabs" role="tablist">
+        <button data-page="seed" class="sel">Seed</button>
+        <button data-page="runs">History</button>
+        <button data-page="help">How-to</button>
+      </div>
+      <div class="menuPage" data-page="seed">
+        <div class="muted">seed</div>
+        <div class="row"><input id="seedInput" spellcheck="false"><button id="seedGo">New run</button><button id="dailyGo" title="today's shared dungeon (same for everyone, UTC)">Daily run</button><button id="copyLinkBtn" title="copy a shareable link to this run">🔗</button><button id="setupBtn" title="choose class & difficulty">⚙</button><button id="soundBtn" title="toggle sound">🔊</button></div>
+        <div class="muted">Current: <code id="seedShow">—</code> · <span id="loadoutShow"></span>depth <span id="depthShow">1</span></div>
+      </div>
+      <div class="menuPage" data-page="runs" hidden>
+        <div class="runsHead">
+          <span class="muted">Runs</span>
+          <span id="runsFilter"></span>
+        </div>
+        <div id="runsStat" class="muted"></div>
+        <div id="runsList"></div>
+      </div>
+      <div class="menuPage muted" data-page="help" hidden style="font-size:12px">
+        Move: arrows / WASD / hjkl+yubn · wait: space or .<br>
+        Pick up: g · use item: 1–8 (or tap a slot) · descend: &gt;<br>
+        Locked doors (brown +) open by walking into them with a key.<br>
+        Loadout: pick class &amp; difficulty at the start (⚙ to change).<br>
+        Cleric's staff strikes an enemy one tile away — press toward it.<br>
+        Touch: on-screen pad appears on phones/tablets; its center button<br>
+        interacts — pick up / descend / wait, depending where you stand.<br>
+        Phone: use Share → <b>Add to Home Screen</b> to play fullscreen.<br>
+        Share a run: append <code>?seed=</code> (and <code>?class=</code>/<code>?diff=</code>) to the URL.
+        <div id="verTag" style="margin-top:8px; opacity:.45; font-size:11px"></div>
+      </div>
     </div>
     <div class="panel" id="hud"></div>
     <div class="panel" id="inv"></div>
-    <div class="panel" id="runsPanel">
-      <div class="runsHead">
-        <span class="muted">Runs</span>
-        <span id="runsFilter"></span>
-      </div>
-      <div id="runsStat" class="muted"></div>
-      <div id="runsList"></div>
-    </div>
     <div class="panel" id="debugWrap">
       <div class="muted" style="margin-bottom:6px">Debug (?debug=1)</div>
       <div id="debugPanel" class="muted">disabled</div>
-    </div>
-    <div class="panel muted" id="helpPanel" style="font-size:12px">
-      Move: arrows / WASD / hjkl+yubn · wait: space or .<br>
-      Pick up: g · use item: 1–8 (or tap a slot) · descend: &gt;<br>
-      Locked doors (brown +) open by walking into them with a key.<br>
-      Loadout: pick class &amp; difficulty at the start (⚙ to change).<br>
-      Cleric's staff strikes an enemy one tile away — press toward it.<br>
-      Touch: on-screen pad appears on phones/tablets; its center button<br>
-      interacts — pick up / descend / wait, depending where you stand.<br>
-      Phone: use Share → <b>Add to Home Screen</b> to play fullscreen.<br>
-      Share a run: append <code>?seed=</code> (and <code>?class=</code>/<code>?diff=</code>) to the URL.
-      <div id="verTag" style="margin-top:8px; opacity:.45; font-size:11px"></div>
     </div>
   </div>
 </div>
@@ -2446,7 +2465,7 @@ if (typeof document !== "undefined") {
 
   // Bump this on every deploy — shown de-emphasised in the help panel so you can
   // confirm the home-screen app actually reloaded the latest build.
-  const APP_VERSION = "build 17 · 2026-09-04";
+  const APP_VERSION = "build 18 · 2026-09-04";
 
   let game;
   const debugState = { revealAll: false, flow: false };
@@ -3312,15 +3331,31 @@ if (typeof document !== "undefined") {
     });
   }
 
+  /* --- Menu: one button, three pages (seed / history / how-to) ----------- */
+  const menuBtn = document.getElementById("menuBtn");
+  const menuPanel = document.getElementById("menuPanel");
+  function setMenuOpen(open) {
+    menuPanel.hidden = !open;
+    menuBtn.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+  menuBtn.onclick = () => setMenuOpen(menuPanel.hidden);
+  // Tab strip: light up the picked tab and show only its page.
+  document.getElementById("menuTabs").addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-page]"); if (!b) return;
+    for (const t of menuPanel.querySelectorAll("#menuTabs button")) t.classList.toggle("sel", t === b);
+    for (const p of menuPanel.querySelectorAll(".menuPage")) p.hidden = p.dataset.page !== b.dataset.page;
+  });
+
   /* --- Seed + sound controls --------------------------------------------- */
   document.getElementById("seedGo").onclick = () => {
     const v = document.getElementById("seedInput").value.trim();
+    setMenuOpen(false); // get the menu out of the way so the fresh run is visible
     newRun(v || pickSeed());
   };
   // Daily run: derive today's UTC seed, ignoring whatever's in the seed box so
   // the daily is always the daily. newRun echoes the resolved seed into the box
   // and the "Current:" line, so the player sees exactly what to share.
-  document.getElementById("dailyGo").onclick = () => newRun(API.dailySeed());
+  document.getElementById("dailyGo").onclick = () => { setMenuOpen(false); newRun(API.dailySeed()); };
   // Copy-link button in the run chrome: share the live run, or — before a run has
   // begun — whatever seed+loadout is queued in the box. shareSeed prefers the Web
   // Share sheet on touch and falls back to copying the link.
