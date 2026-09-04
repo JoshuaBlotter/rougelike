@@ -76,6 +76,14 @@
   .card button { padding: 8px 14px; }
   .card button.primary { background: #1e3a2a; border-color: #2f6d4a; color: #8ef0a0; }
   .card button.primary:hover { background: #245036; }
+  /* Pre-run setup overlay: stacked, selectable difficulty/class options. */
+  .card .setupGroup { text-align: left; margin: 8px 0 4px; min-width: 250px; }
+  .card .setupLabel { color: #6b7688; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; margin: 0 0 4px; }
+  .card .opt { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; width: 100%; margin: 4px 0; padding: 7px 10px; }
+  .card .opt b { color: #e6ebf2; font-weight: 600; }
+  .card .opt span { color: #6b7688; font-size: 11px; }
+  .card .opt.sel { border-color: #2f6d4a; background: #16241c; }
+  .card .opt.sel b { color: #8ef0a0; }
 
   /* touch controls — shown on coarse pointers / small screens only. The center
      button is a context-aware Interact: pick up / descend / wait, self-labelling. */
@@ -158,8 +166,8 @@
     <h1>SEEDED ROGUELIKE</h1>
     <div class="panel" id="seedPanel">
       <div class="muted">seed</div>
-      <div class="row"><input id="seedInput" spellcheck="false"><button id="seedGo">New run</button><button id="soundBtn" title="toggle sound">🔊</button></div>
-      <div class="muted">Current: <code id="seedShow">—</code> · depth <span id="depthShow">1</span></div>
+      <div class="row"><input id="seedInput" spellcheck="false"><button id="seedGo">New run</button><button id="setupBtn" title="choose class & difficulty">⚙</button><button id="soundBtn" title="toggle sound">🔊</button></div>
+      <div class="muted">Current: <code id="seedShow">—</code> · <span id="loadoutShow"></span>depth <span id="depthShow">1</span></div>
     </div>
     <div class="panel" id="hud"></div>
     <div class="panel" id="inv"></div>
@@ -171,10 +179,12 @@
       Move: arrows / WASD / hjkl+yubn · wait: space or .<br>
       Pick up: g · use item: 1–8 (or tap a slot) · descend: &gt;<br>
       Locked doors (brown +) open by walking into them with a key.<br>
+      Loadout: pick class &amp; difficulty at the start (⚙ to change).<br>
+      Cleric's staff strikes an enemy one tile away — press toward it.<br>
       Touch: on-screen pad appears on phones/tablets; its center button<br>
       interacts — pick up / descend / wait, depending where you stand.<br>
       Phone: use Share → <b>Add to Home Screen</b> to play fullscreen.<br>
-      Share a run: append <code>?seed=</code> to the URL.
+      Share a run: append <code>?seed=</code> (and <code>?class=</code>/<code>?diff=</code>) to the URL.
       <div id="verTag" style="margin-top:8px; opacity:.45; font-size:11px"></div>
     </div>
   </div>
@@ -421,6 +431,41 @@ const WEAPON_LADDER = [
   { name: "Great Axe",         bonus: 6 },
   { name: "Pristine Greataxe", bonus: 9 },
 ];
+
+// Difficulty presets. Chosen before a run, they are a PLAYER-side input — never
+// part of the seed — so generation (and every determinism test/hash) is identical
+// across all three. They only scale the player's max HP, an enemy-damage multiplier
+// applied at strike time, and how much of the map the renderer reveals.
+//   mapReveal: "all"     — whole layout shown dim, current room lit (Easy aid)
+//              "seen"    — remembered terrain persists (Normal, the classic look)
+//              "current" — only tiles in view right now; memory fades (Hard fog)
+const DIFFICULTIES = {
+  easy:   { name: "Easy",   hpMul: 1.4, enemyDmgMul: 0.7, mapReveal: "all" },
+  normal: { name: "Normal", hpMul: 1.0, enemyDmgMul: 1.0, mapReveal: "seen" },
+  hard:   { name: "Hard",   hpMul: 1.0, enemyDmgMul: 1.4, mapReveal: "current" },
+};
+const DEFAULT_DIFFICULTY = "normal";
+
+// Starting classes. Also a player-side input, applied to the fresh player AFTER
+// the floor is built, so they never touch generation. Each differs by max HP,
+// starting weapon (name + ladder rung + bonus), a flat attack bonus, melee reach
+// (the Cleric's staff strikes an enemy one tile beyond adjacent), and a small
+// starting pack. Leaving classId null yields the original fists/30-HP player that
+// the headless tests and bots expect — the live game always picks one of these.
+const CLASSES = {
+  warrior: { id: "warrior", name: "Warrior", baseHp: 34, weaponName: "Battle Axe", weaponTier: 2, weaponBonus: 4, attackBonus: 0, reach: 1, startItems: [],
+             blurb: "Axe · 34 HP · sturdy, hits hard up close" },
+  cleric:  { id: "cleric",  name: "Cleric",  baseHp: 24, weaponName: "Staff",      weaponTier: 0, weaponBonus: 2, attackBonus: 0, reach: 2, startItems: ["healing_potion", "regen_tonic"],
+             blurb: "Staff · 24 HP · strikes 1 tile away · frail, starts with heals" },
+  rogue:   { id: "rogue",   name: "Rogue",   baseHp: 28, weaponName: "Daggers",    weaponTier: 0, weaponBonus: 2, attackBonus: 1, reach: 1, startItems: ["blink_scroll", "firebomb"],
+             blurb: "Daggers · 28 HP · quick · starts with Blink + Firebomb" },
+};
+const DEFAULT_CLASS = "warrior";
+
+// Boss loot: a boss death drops one guaranteed, strong item on its tile. Fixed per
+// boss type (no RNG — keeps combat's deterministic stream untouched); endless bosses
+// cycle the same three types, so this table covers them too.
+const BOSS_LOOT = { ogre: "strong_potion", shade: "strength_shard", lich: "greataxe" };
 
 /* =========================================================================
  * SIMULATION  —  pure data + logic, zero DOM/canvas
@@ -822,11 +867,17 @@ function generateFloor(seedString, depth) {
   throw new Error(`[gen] seed "${seedString}" depth ${depth} failed after ${GEN.maxRegens} regenerations — generator bug`);
 }
 
-function createGame(seedString, depth = 1) {
+// opts.difficulty ("easy"|"normal"|"hard") and opts.classId ("warrior"|"cleric"|
+// "rogue") are player-side choices. Both are applied AFTER the floor is generated,
+// so neither perturbs generation — the classless/normal defaults reproduce the
+// original player exactly, which is what the headless tests and bots rely on.
+function createGame(seedString, depth = 1, opts = {}) {
   const floor = generateFloor(seedString, depth);
   const g = {
     seed: String(seedString),
     depth,
+    difficulty: DIFFICULTIES[opts.difficulty] ? opts.difficulty : DEFAULT_DIFFICULTY,
+    classId: CLASSES[opts.classId] ? opts.classId : null,
     floor,
     tiles: floor.tiles,
     w: floor.w,
@@ -834,7 +885,7 @@ function createGame(seedString, depth = 1) {
     player: {
       x: floor.spawn.x, y: floor.spawn.y, prevX: floor.spawn.x, prevY: floor.spawn.y,
       hp: PLAYER_HP, maxHp: PLAYER_HP, speed: PLAYER_SPEED, energy: 0, alive: true,
-      weaponBonus: 0, weaponName: "fists", weaponTier: -1, attackBonus: 0, regen: 0,
+      weaponBonus: 0, weaponName: "fists", weaponTier: -1, attackBonus: 0, regen: 0, reach: 1,
     },
     inventory: [],   // [{ defId, count }]
     keys: 0,         // carried keys (open locked doors); not an inventory slot
@@ -847,19 +898,35 @@ function createGame(seedString, depth = 1) {
     // mutation never disturbs the canonical layout that hashRun fingerprints.
     enemies: floor.enemies.map(cloneEnemy),
     items: floor.items.map(cloneItem),
+    itemSeq: floor.items.length, // next iid for items dropped during play (boss loot)
     flow: null,      // cached flow field
     flowFrom: -1,    // player tile the cache was built from
     _sfCache: new Map(), // search fields by target tile (valid for the whole floor)
   };
+  if (g.classId) applyClass(g, g.classId); // sets HP/weapon/reach/pack for the chosen class
   updateFOV(g); // seed the initial visible/remembered sets
   return g;
+}
+
+// Stamp a class onto a freshly-built game's player: max HP (scaled by difficulty),
+// starting weapon, flat attack bonus, melee reach, and a small starting pack. No
+// RNG, so it stays outside the determinism contract.
+function applyClass(g, classId) {
+  const c = CLASSES[classId]; if (!c) return;
+  const p = g.player;
+  p.maxHp = Math.max(1, Math.round(c.baseHp * DIFFICULTIES[g.difficulty].hpMul));
+  p.hp = p.maxHp;
+  p.weaponName = c.weaponName; p.weaponTier = c.weaponTier; p.weaponBonus = c.weaponBonus;
+  p.attackBonus = c.attackBonus || 0;
+  p.reach = c.reach || 1;
+  for (const defId of c.startItems || []) addToInventory(g, defId);
 }
 
 // Descend: build the next floor from the SAME string seed at depth+1 (fixed by
 // (seed, depth), unaffected by the route taken here) while CARRYING the player's
 // progression — hp, weapon, upgrades, inventory, and run counters.
 function descend(g) {
-  const next = createGame(g.seed, g.depth + 1);
+  const next = createGame(g.seed, g.depth + 1, { difficulty: g.difficulty, classId: g.classId });
   const p = next.player, o = g.player;
   // Descending grows the player a little (a second scaling axis) and grants a
   // partial heal — the reward for pressing deeper. Growth is deliberately gentler
@@ -871,7 +938,7 @@ function descend(g) {
   // potion, so this doesn't reintroduce the passive-regen-to-full problem.)
   p.hp = Math.min(p.maxHp, Math.max(o.hp + 8, Math.floor(p.maxHp * 0.65)));
   p.weaponBonus = o.weaponBonus; p.weaponName = o.weaponName; p.weaponTier = o.weaponTier;
-  p.attackBonus = o.attackBonus; p.regen = o.regen; p.energy = 0; p.alive = true;
+  p.attackBonus = o.attackBonus; p.regen = o.regen; p.reach = o.reach; p.energy = 0; p.alive = true;
   next.inventory = g.inventory.map((s) => ({ ...s }));
   next.keys = g.keys; // keys carry down (a spare opens the next floor's vault early)
   next.turn = g.turn; next.kills = g.kills; next.itemsFound = g.itemsFound;
@@ -1222,6 +1289,9 @@ function playerAttackPower(g) { return PLAYER_ATTACK + g.player.weaponBonus + g.
 function attack(g, attacker, defender, verb = "hits") {
   const isPlayer = attacker === g.player;
   let dmg = isPlayer ? playerAttackPower(g) : attacker.damage; // enemy damage is depth-scaled
+  // Difficulty scales incoming damage only (Normal = x1.0, an exact no-op — the
+  // combat RNG draw below is unchanged, so determinism tests are unaffected).
+  if (!isPlayer) dmg = Math.round(dmg * DIFFICULTIES[g.difficulty].enemyDmgMul);
   dmg += g.floor.rng.combat.range(-1, 1); // small deterministic variance
   if (dmg < 1) dmg = 1;
   defender.hp -= dmg;
@@ -1229,8 +1299,24 @@ function attack(g, attacker, defender, verb = "hits") {
   else pushMsg(g, `The ${ENEMY_TYPES[attacker.typeId].name} ${verb} you for ${dmg}.`);
   if (defender.hp <= 0) {
     if (defender === g.player) { g.player.alive = false; g.gameOver = true; g.overReason = "killed"; }
-    else { defender.alive = false; g.kills++; pushMsg(g, `The ${ENEMY_TYPES[defender.typeId].name} dies.`); }
+    else { defender.alive = false; g.kills++; pushMsg(g, `The ${ENEMY_TYPES[defender.typeId].name} dies.`); dropBossLoot(g, defender); }
   }
+}
+
+// A boss death drops one fixed, strong item. Placed on the boss's tile if it's a
+// free floor cell, else the nearest free neighbour, so the loot never vanishes and
+// never stacks on an existing drop. No RNG (fixed BOSS_LOOT table) — deterministic.
+function dropBossLoot(g, e) {
+  if (!ENEMY_TYPES[e.typeId].boss) return;
+  const defId = BOSS_LOOT[e.typeId]; if (!defId) return;
+  const free = (x, y) => inBounds(x, y) && g.tiles[idx(x, y)] === TILE.FLOOR && !g.items.some((it) => it.x === x && it.y === y);
+  let tx = e.x, ty = e.y;
+  if (!free(tx, ty)) {
+    const spot = DIRS8.map((d) => ({ x: e.x + d.dx, y: e.y + d.dy })).find((p) => free(p.x, p.y));
+    if (spot) { tx = spot.x; ty = spot.y; } // else fall back to the boss tile (may stack; loot still reachable)
+  }
+  g.items.push({ iid: g.itemSeq++, x: tx, y: ty, defId });
+  pushMsg(g, `The ${ENEMY_TYPES[e.typeId].name} drops a ${ITEM_DEFS[defId].name}!`);
 }
 
 /* --- Item effects (orthogonal) ------------------------------------------- */
@@ -1310,7 +1396,7 @@ function doFirebomb(g, radius, damage) {
     if (!e.alive) continue;
     if (Math.max(Math.abs(e.x - target.x), Math.abs(e.y - target.y)) <= radius) {
       e.hp -= damage; hit++;
-      if (e.hp <= 0) { e.alive = false; g.kills++; }
+      if (e.hp <= 0) { e.alive = false; g.kills++; dropBossLoot(g, e); }
     }
   }
   pushMsg(g, `The firebomb scorches ${hit} enem${hit === 1 ? "y" : "ies"}.`);
@@ -1360,6 +1446,15 @@ function playerMove(g, dx, dy) {
   const nx = g.player.x + dx, ny = g.player.y + dy;
   const target = g.enemies.find((e) => e.alive && e.x === nx && e.y === ny);
   if (target) { attack(g, g.player, target); endPlayerAction(g); return true; }
+  // Reach weapon (the Cleric's staff, reach 2): with nothing adjacent in this
+  // direction, strike an enemy one tile further along it — but only when the tile
+  // between is open floor (you poke past an empty gap, never through a wall or a
+  // locked door). No step is taken, so a frail class can trade from safety.
+  if ((g.player.reach || 1) >= 2 && isWalkable(g, nx, ny)) {
+    const bx = nx + dx, by = ny + dy;
+    const far = g.enemies.find((e) => e.alive && e.x === bx && e.y === by);
+    if (far) { attack(g, g.player, far, "strikes"); endPlayerAction(g); return true; }
+  }
   // A locked door: spend a key to open it (and step through), else it blocks.
   if (inBounds(nx, ny) && g.tiles[idx(nx, ny)] === TILE.DOOR) {
     if (g.keys > 0) {
@@ -2023,6 +2118,7 @@ const API = {
   hashRun, generateReport, balanceReport, competentBot, runTests,
   TILE, DIRS8, DIRS4, MAP_W, MAP_H, idx, requiredStairDist, ENEMY_TYPES, ITEM_DEFS, UNREACHABLE, INV_CAP,
   FINAL_DEPTH, isBossFloor, bossForDepth,
+  DIFFICULTIES, DEFAULT_DIFFICULTY, CLASSES, DEFAULT_CLASS, BOSS_LOOT,
   setSource(t) { SOURCE_TEXT = t; },
 };
 
@@ -2045,7 +2141,7 @@ if (typeof document !== "undefined") {
 
   // Bump this on every deploy — shown de-emphasised in the help panel so you can
   // confirm the home-screen app actually reloaded the latest build.
-  const APP_VERSION = "build 11 · 2026-09-03";
+  const APP_VERSION = "build 12 · 2026-09-03";
 
   let game;
   const debugState = { revealAll: false, flow: false };
@@ -2114,15 +2210,74 @@ if (typeof document !== "undefined") {
     //   Once chosen, the run is fully deterministic from that string.
   }
 
+  /* --- Pre-run loadout (difficulty + class) ------------------------------- */
+  // The chosen loadout is a UI convenience remembered across reloads; the run's
+  // determinism still comes entirely from the seed string. URL params (?diff=,
+  // ?class=) let a shared link fix the loadout too.
+  const runConfig = { difficulty: DEFAULT_DIFFICULTY, classId: DEFAULT_CLASS };
+  (function loadConfig() {
+    try {
+      const d = localStorage.getItem("rl.difficulty"); if (DIFFICULTIES[d]) runConfig.difficulty = d;
+      const c = localStorage.getItem("rl.classId");    if (CLASSES[c])     runConfig.classId = c;
+    } catch (_) {}
+    const pd = params.get("diff"), pc = params.get("class");
+    if (DIFFICULTIES[pd]) runConfig.difficulty = pd;
+    if (CLASSES[pc]) runConfig.classId = pc;
+  })();
+  function saveConfig() {
+    try {
+      localStorage.setItem("rl.difficulty", runConfig.difficulty);
+      localStorage.setItem("rl.classId", runConfig.classId);
+    } catch (_) {}
+  }
+
+  const DIFF_BLURB = { easy: "+HP · weaker foes · whole map shown", normal: "the standard descent", hard: "enemies hit harder · only what you can see" };
+  // Render the start-of-run chooser into the shared overlay card. Selecting an
+  // option re-renders (cheap) to move the highlight; Start begins the run.
+  function showSetup() {
+    const opt = (attr, id, name, blurb, sel) =>
+      `<button class="opt${sel ? " sel" : ""}" data-${attr}="${id}"><b>${name}</b><span>${escapeHtml(blurb)}</span></button>`;
+    const diffs = ["easy", "normal", "hard"].map((id) =>
+      opt("diff", id, DIFFICULTIES[id].name, DIFF_BLURB[id], runConfig.difficulty === id)).join("");
+    const classes = ["warrior", "cleric", "rogue"].map((id) =>
+      opt("cls", id, CLASSES[id].name, CLASSES[id].blurb, runConfig.classId === id)).join("");
+    document.getElementById("overlayCard").innerHTML =
+      `<h2 class="win" style="color:#8be9fd; letter-spacing:2px">NEW RUN</h2>` +
+      `<div class="sub">choose a loadout, then descend</div>` +
+      `<div class="setupGroup"><div class="setupLabel">Difficulty</div>${diffs}</div>` +
+      `<div class="setupGroup"><div class="setupLabel">Class</div>${classes}</div>` +
+      `<div class="btns"><button class="primary" id="startBtn">Start ▶</button></div>`;
+    document.getElementById("overlay").classList.add("show");
+    document.querySelectorAll("#overlayCard [data-diff]").forEach((b) =>
+      b.onclick = () => { runConfig.difficulty = b.dataset.diff; showSetup(); });
+    document.querySelectorAll("#overlayCard [data-cls]").forEach((b) =>
+      b.onclick = () => { runConfig.classId = b.dataset.cls; showSetup(); });
+    document.getElementById("startBtn").onclick = () => {
+      saveConfig();
+      const seed = document.getElementById("seedInput").value.trim() || pickSeed();
+      hideEnd();
+      newRun(seed, 1, runConfig);
+    };
+  }
+
   // A UI-only notice (e.g. "Blocked."), kept on the same message log the sim uses.
   function note(msg) { game.messages.push(msg); if (game.messages.length > 6) game.messages.shift(); }
 
-  function newRun(seed, depth = 1) {
-    game = createGame(seed, depth);
+  function updateLoadoutShow() {
+    const el = document.getElementById("loadoutShow");
+    if (!el || !game) return;
+    const cName = CLASSES[game.classId] ? CLASSES[game.classId].name : "Adventurer";
+    el.textContent = cName + " · " + DIFFICULTIES[game.difficulty].name + " · ";
+  }
+
+  function newRun(seed, depth = 1, cfg = runConfig) {
+    game = createGame(seed, depth, cfg);
     document.getElementById("seedInput").value = game.seed;
     document.getElementById("seedShow").textContent = game.seed;
     document.getElementById("depthShow").textContent = game.depth;
-    game.messages = ["Welcome. Seed: " + game.seed];
+    updateLoadoutShow();
+    const who = CLASSES[game.classId] ? CLASSES[game.classId].name : "adventurer";
+    game.messages = ["Welcome, " + who + ". Seed: " + game.seed];
     RL.advanceGame(game); // fast-forward to the player's first turn
     if (DEBUG) RL.updateFlow(game); // populate the flow cache so the overlay shows pre-move
     resetFx();
@@ -2249,11 +2404,18 @@ if (typeof document !== "undefined") {
     ctx.save();
     if (s > 0.15) ctx.translate(Math.sin(now() * 0.05) * s, Math.cos(now() * 0.043) * s);
     const reveal = debugState.revealAll;
+    // Difficulty decides how much terrain the renderer shows: Easy reveals the whole
+    // layout (unlit cells drawn dim), Hard shows only what's in view right now
+    // (memory fades each step), Normal keeps remembered terrain. Entities are still
+    // only ever drawn where currently visible, in every mode.
+    const mapReveal = (DIFFICULTIES[game.difficulty] || DIFFICULTIES.normal).mapReveal;
     for (let y = 0; y < game.h; y++) {
       for (let x = 0; x < game.w; x++) {
         const i = idx(x, y);
         const lit = reveal || game.visible[i];
-        const known = lit || game.seen[i];
+        const known = reveal || lit ||
+          (mapReveal === "all") ||
+          (mapReveal === "seen" && game.seen[i]); // "current": lit only
         if (!known) continue; // unknown -> stays black
         const t = game.tiles[i];
         ctx.fillStyle = (lit ? PALETTE.lit : PALETTE.dim)[t];
@@ -2415,10 +2577,12 @@ if (typeof document !== "undefined") {
     let btns = "";
     if (won) {
       btns = `<button class="primary" id="continueBtn">Continue (Endless)</button>` +
-             `<button id="newSeedBtn">New seed</button>`;
+             `<button id="newSeedBtn">New seed</button>` +
+             `<button id="loadoutBtn">Change loadout</button>`;
     } else {
       btns = `<button class="primary" id="retryBtn">Retry this seed</button>` +
-             `<button id="newSeedBtn">New seed</button>`;
+             `<button id="newSeedBtn">New seed</button>` +
+             `<button id="loadoutBtn">Change loadout</button>`;
     }
     document.getElementById("overlayCard").innerHTML =
       `<h2 class="${won ? "win" : ""}">${won ? "DUNGEON CLEARED" : "YOU DIED"}</h2>` +
@@ -2436,6 +2600,8 @@ if (typeof document !== "undefined") {
     const cont = document.getElementById("continueBtn");
     if (cont) cont.onclick = () => continueEndless();
     document.getElementById("newSeedBtn").onclick = () => newRun(pickSeed());
+    const loadoutBtn = document.getElementById("loadoutBtn");
+    if (loadoutBtn) loadoutBtn.onclick = () => showSetup();
   }
   function hideEnd() { document.getElementById("overlay").classList.remove("show"); }
 
@@ -2451,7 +2617,7 @@ if (typeof document !== "undefined") {
   };
   window.addEventListener("keydown", (e) => {
     if (e.target && e.target.tagName === "INPUT") return; // typing a seed, not playing
-    if (game.gameOver) return;                            // dead: buttons only, until a new run
+    if (!game || game.gameOver) return;                   // setup open or dead: buttons only
     const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
     if (key === ">" && onStairs()) { e.preventDefault(); doDescend(); return; }
     if (key >= "1" && key <= "8") { e.preventDefault(); doUse(parseInt(key, 10) - 1); return; }
@@ -2517,13 +2683,17 @@ if (typeof document !== "undefined") {
   });
   const soundBtn = document.getElementById("soundBtn");
   soundBtn.onclick = () => { audioOn = !audioOn; soundBtn.textContent = audioOn ? "🔊" : "🔇"; };
+  document.getElementById("setupBtn").onclick = () => showSetup();
 
   // Boot.
   if (params.get("test") === "1") {
     const r = runTests();
     document.title = "Roguelike — " + (r.fail === 0 ? "TESTS PASS" : "TESTS FAIL");
   }
-  newRun(pickSeed());
+  // Open the loadout chooser first; the run begins when the player hits Start. The
+  // seed field is prefilled (from ?seed= or a fresh random) so it's ready to edit.
+  document.getElementById("seedInput").value = pickSeed();
+  showSetup();
   document.getElementById("verTag").textContent = APP_VERSION;
   // The debug panel (and its ?debug=1 hint) only exists when debug mode is on.
   if (DEBUG) document.getElementById("debugPanel").textContent = "enabled";
