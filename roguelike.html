@@ -2387,7 +2387,7 @@ if (typeof document !== "undefined") {
 
   // Bump this on every deploy — shown de-emphasised in the help panel so you can
   // confirm the home-screen app actually reloaded the latest build.
-  const APP_VERSION = "build 12 · 2026-09-03";
+  const APP_VERSION = "build 13 · 2026-09-03";
 
   let game;
   const debugState = { revealAll: false, flow: false };
@@ -2643,6 +2643,8 @@ if (typeof document !== "undefined") {
     if (DEBUG) RL.updateFlow(game); // populate the flow cache so the overlay shows pre-move
     resetFx();
     hideEnd();
+    runsFilter = game.difficulty; // the Runs board tracks the difficulty you're playing
+    renderRuns();
     if (game.gameOver) showEnd();
     render();
   }
@@ -3160,6 +3162,7 @@ if (typeof document !== "undefined") {
   // seed field is prefilled (from ?seed= or a fresh random) so it's ready to edit.
   document.getElementById("seedInput").value = pickSeed();
   showSetup();
+  renderRuns(); // populate the Runs board from stored history before the first run
   document.getElementById("verTag").textContent = APP_VERSION;
   // The debug panel (and its ?debug=1 hint) only exists when debug mode is on.
   if (DEBUG) document.getElementById("debugPanel").textContent = "enabled";
