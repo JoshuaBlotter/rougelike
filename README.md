@@ -46,6 +46,11 @@ server, no dependencies, no assets — one self-contained file. Everything is dr
 - **A campaign with a finish line.** Twelve floors, bosses at 4/8/12, a win screen, then an
   optional endless mode. Enemy HP/damage/count scale (on separate curves) while the player's
   power is capped, so late floors actually threaten a geared-up hero instead of melting.
+- **Locked vaults.** Some floors seal a room of strong loot behind a locked door; the key is
+  hidden elsewhere on the floor (never behind the door it opens). A few rooms become real
+  treasure destinations without every room carrying loot.
+- **Pack hunters.** Hounds run as a pack — aggro one and the whole pack howls and converges on
+  your last-known position, so it can still be led astray around a corner.
 - **Cosmetic-only juice** layered strictly on top of the resolved sim: smooth movement
   interpolation, screen shake, hit flashes, a damage vignette, and synthesised Web Audio
   blips — none of it ever writes back into game state, so determinism is untouched.

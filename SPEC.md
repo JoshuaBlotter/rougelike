@@ -69,11 +69,19 @@ single static file directly).
   touch no generation, so `hashRun` and the pinned determinism hash are unaffected. Also fixed a
   bug: `ENEMY_TYPES` had no `name`, so every combat line read "The undefined hits you" — added
   display names.
-- **Pack behavior (§5, "optional") skipped** — the threat budget keeps groups small and the
-  boss-escort model covers regrouping; it didn't earn its complexity yet.
-- **Locked doors / keys not implemented** — the softlock-avoidance section is written
-  conditionally ("if you add locked doors"); none were added, so that check is a documented
-  no-op rather than a faked pass.
+- **Pack behavior (§5) — implemented.** Hounds are a `pack` type: when one sights the player
+  it howls and the whole hound pack across the floor is roused (searching the last-known
+  position, distance-unbounded — unlike the sound-radius `propagateAlert`), so you aggro one
+  and the pack converges. Lone non-pack foes are unaffected. Covered by a test.
+- **Locked doors / keys — implemented.** Some floors seal a small dead-end region behind a
+  locked `TILE.DOOR`, filled with strong loot (and maybe a dormant guard); the Iron Key is
+  dropped somewhere reachable *without* the door. This does the spec's anti-softlock recipe:
+  pick the door tile, confirm that closing it still leaves the stairs and the key reachable,
+  *then* lock it. Keys are a carried count (not a pack slot); bumping a locked door spends one.
+  The §3 "no key/door softlock" check in the 1000-floor report is now a **real** assertion
+  (doors-open connectivity for "no isolated pocket"; doors-closed reachability for stairs+key).
+  This is also the answer to "why walk down a hall to an empty room" — a few rooms are now
+  genuine treasure destinations without every room carrying loot.
 - **Post-M7: turned the endless staircase into a campaign + endless mode.** Playtesting
   showed the original "descend forever" had no goal and the player snowballed (attack far
   outran enemy damage, count was hard-capped at 8, and depth 11 actually *crashed* because

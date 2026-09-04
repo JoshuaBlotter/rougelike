@@ -170,6 +170,7 @@
     <div class="panel muted" id="helpPanel" style="font-size:12px">
       Move: arrows / WASD / hjkl+yubn · wait: space or .<br>
       Pick up: g · use item: 1–8 (or tap a slot) · descend: &gt;<br>
+      Locked doors (brown +) open by walking into them with a key.<br>
       Touch: on-screen pad appears on phones/tablets; its center button<br>
       interacts — pick up / descend / wait, depending where you stand.<br>
       Phone: use Share → <b>Add to Home Screen</b> to play fullscreen.<br>
@@ -280,9 +281,16 @@ function makeStreams(seedString, depth) {
  * CONTENT TABLES  —  data-driven, top of file
  * =======================================================================*/
 
-const TILE = { WALL: 0, FLOOR: 1, STAIRS: 2 };
-// A tile is walkable if it isn't a wall. STAIRS sit on floor and are walkable.
-function tileWalkable(t) { return t !== TILE.WALL; }
+const TILE = { WALL: 0, FLOOR: 1, STAIRS: 2, DOOR: 3 };
+// Walkable = not a wall and not a CLOSED locked door. STAIRS sit on floor and are
+// walkable. A door blocks movement, pathing and sight until it's unlocked with a
+// key, at which point its tile becomes FLOOR.
+function tileWalkable(t) { return t !== TILE.WALL && t !== TILE.DOOR; }
+// Passability ignoring doors — used only during generation/validation to reason
+// about the map "as if every door were open" (no truly isolated pockets).
+function tilePassableOpen(t) { return t !== TILE.WALL; }
+// A closed door blocks line of sight too (it's solid until opened).
+function blocksSight(t) { return t === TILE.WALL || t === TILE.DOOR; }
 
 // 8-directional movement. Diagonals last so orthogonal ties resolve to
 // cardinal moves first where it matters.
@@ -342,7 +350,7 @@ function bossForDepth(depth) {
 // `boss: true` types are never in the random pool — they're placed on boss floors.
 const ENEMY_TYPES = {
   grunt:  { id: "grunt",  name: "Grunt",  glyph: "g", color: "#ff6b6b", hp: 6,  damage: 2, speed: 100, sight: 8, behavior: "melee",  debut: 1, weight: 10, threat: 1 },
-  hound:  { id: "hound",  name: "Hound",  glyph: "h", color: "#ffa94d", hp: 4,  damage: 2, speed: 165, sight: 9, behavior: "melee",  debut: 2, weight: 9,  threat: 1.5 },
+  hound:  { id: "hound",  name: "Hound",  glyph: "h", color: "#ffa94d", hp: 4,  damage: 2, speed: 165, sight: 9, behavior: "melee",  debut: 2, weight: 9,  threat: 1.5, pack: true },
   brute:  { id: "brute",  name: "Brute",  glyph: "B", color: "#c92a2a", hp: 15, damage: 4, speed: 65,  sight: 7, behavior: "melee",  debut: 3, weight: 6,  threat: 3 },
   archer: { id: "archer", name: "Archer", glyph: "a", color: "#63e6be", hp: 6,  damage: 3, speed: 100, sight: 9, behavior: "ranged", debut: 5, weight: 6,  threat: 2.5, rangeMin: 3, rangeMax: 6 },
   imp:    { id: "imp",    name: "Imp",    glyph: "i", color: "#da77f2", hp: 5,  damage: 2, speed: 120, sight: 9, behavior: "flee",   debut: 6, weight: 6,  threat: 1 },
@@ -392,9 +400,15 @@ const ITEM_DEFS = {
   blink_scroll:   { name: "Blink Scroll",   glyph: "?", color: "#8be9fd", tier: 2, weight: 12, depthMin: 2, depthMax: 99, kind: "consumable", effect: { type: "blink", range: 6 } },
   firebomb:       { name: "Firebomb",       glyph: "o", color: "#ff6b6b", tier: 2, weight: 12, depthMin: 2, depthMax: 99, kind: "consumable", effect: { type: "area", radius: 2, damage: 8 } },
   regen_tonic:    { name: "Regen Tonic",    glyph: "+", color: "#c58bff", tier: 2, weight: 10, depthMin: 3, depthMax: 99, kind: "consumable", effect: { type: "regen", turns: 6 } },
+  // Iron Key: not in the random loot pool (noRoll) — placed only by locked-vault
+  // generation. Picked up into a carried key count, not an inventory slot.
+  iron_key:       { name: "Iron Key",       glyph: "¡", color: "#ffe066", tier: 1, weight: 0, depthMin: 1, depthMax: 99, kind: "key", noRoll: true, effect: { type: "key" } },
 };
 function isHealItem(defId) { return ITEM_DEFS[defId].effect.type === "heal"; }
 function isWeaponOrUpgrade(defId) { const k = ITEM_DEFS[defId].kind; return k === "weapon" || k === "upgrade"; }
+// The pool of good loot that appears inside a locked vault — the payoff for
+// finding the key. Skewed to permanent power and strong consumables.
+const VAULT_LOOT = ["greataxe", "strong_potion", "strength_shard", "blink_scroll", "firebomb", "regen_tonic"];
 
 // Weapon progression ladder. A weapon drop doesn't clutter the pack — it evolves
 // the single weapon you carry one rung up this ladder (a "Fine Weapon" jumps you
@@ -498,9 +512,10 @@ function carveCorridor(tiles, rng, ax, ay, bx, by, wide) {
   else { vLeg(ax, ay, by); hLeg(by, ax, bx); }
 }
 
-// BFS distance field over 4-connectivity. -1 means unreachable. Reused by
-// connectivity validation now and, in spirit, by the enemy flow field later.
-function bfsDistance(tiles, starts) {
+// BFS distance field over 4-connectivity. -1 means unreachable. `passable` decides
+// which tiles the flood crosses — default is normal walkability (closed doors
+// block); pass `tilePassableOpen` to reason about the map with every door open.
+function bfsDistance(tiles, starts, passable = tileWalkable) {
   const dist = new Int32Array(MAP_W * MAP_H).fill(-1);
   const q = new Int32Array(MAP_W * MAP_H);
   let head = 0, tail = 0;
@@ -512,7 +527,7 @@ function bfsDistance(tiles, starts) {
       const nx = cx + dx, ny = cy + dy;
       if (nx < 0 || ny < 0 || nx >= MAP_W || ny >= MAP_H) continue;
       const ni = idx(nx, ny);
-      if (dist[ni] === -1 && tileWalkable(tiles[ni])) { dist[ni] = d + 1; q[tail++] = ni; }
+      if (dist[ni] === -1 && passable(tiles[ni])) { dist[ni] = d + 1; q[tail++] = ni; }
     }
   }
   return dist;
@@ -630,7 +645,7 @@ function placeItems(rng, tiles, spawn, stairs, enemies, depth) {
   cands.sort((a, b) => a - b);
   rng.shuffle(cands);
 
-  const pool = Object.keys(ITEM_DEFS).filter((id) => depth >= ITEM_DEFS[id].depthMin && depth <= ITEM_DEFS[id].depthMax);
+  const pool = Object.keys(ITEM_DEFS).filter((id) => !ITEM_DEFS[id].noRoll && depth >= ITEM_DEFS[id].depthMin && depth <= ITEM_DEFS[id].depthMax);
   const count = Math.min(cands.length, 2 + Math.floor(depth / 2) + rng.range(0, 2));
   const items = [];
   let nextTile = 0, iid = 0;
@@ -651,6 +666,92 @@ function placeItems(rng, tiles, spawn, stairs, enemies, depth) {
   return items;
 }
 function cloneItem(it) { return { ...it }; }
+
+// Locked vault: seal a small dead-end region behind a locked DOOR, fill it with
+// good loot (+ maybe a guard), and drop the key somewhere reachable WITHOUT the
+// door. This is the anti-softlock recipe from the spec — pick the door tile,
+// confirm closing it still leaves the stairs (and the key) reachable, THEN lock
+// it. It also answers "why walk to that room?": some rooms are now worth the trip.
+// Returns the vault descriptor, or null if this floor gets no vault.
+function placeLockedVault(rng, tiles, rooms, spawn, stairs, enemies, items, depth) {
+  const spawnI = idx(spawn.x, spawn.y), stairsI = idx(stairs.x, stairs.y);
+  const inRoom = new Uint8Array(tiles.length);
+  for (const r of rooms)
+    for (let y = r.y; y <= r.y2; y++) for (let x = r.x; x <= r.x2; x++) inRoom[idx(x, y)] = 1;
+
+  // Door candidates: 1-wide corridor tiles (walls on an opposite pair) — a natural
+  // doorway pinch point, never a room tile.
+  const doorCands = [];
+  const occupied = new Set([spawnI, stairsI]);
+  for (const e of enemies) occupied.add(idx(e.x, e.y));
+  for (const it of items) occupied.add(idx(it.x, it.y));
+
+  for (let y = 1; y < MAP_H - 1; y++) for (let x = 1; x < MAP_W - 1; x++) {
+    const i = idx(x, y);
+    if (tiles[i] !== TILE.FLOOR || inRoom[i] || occupied.has(i)) continue; // never lock over an item/enemy
+    const wN = tiles[idx(x, y - 1)] === TILE.WALL, wS = tiles[idx(x, y + 1)] === TILE.WALL;
+    const wE = tiles[idx(x + 1, y)] === TILE.WALL, wW = tiles[idx(x - 1, y)] === TILE.WALL;
+    if ((wN && wS) || (wE && wW)) doorCands.push(i);
+  }
+  doorCands.sort((a, b) => a - b);
+  rng.map.shuffle(doorCands);
+
+  let walkable = 0;
+  for (let i = 0; i < tiles.length; i++) if (tileWalkable(tiles[i])) walkable++;
+  const minVault = 5, maxVault = Math.max(10, Math.floor(walkable * 0.30));
+  let nextIid = items.reduce((m, it) => Math.max(m, it.iid), -1) + 1;
+
+  for (const d of doorCands) {
+    tiles[d] = TILE.WALL;                                   // test closing this tile
+    const dist = bfsDistance(tiles, [spawnI]);
+    tiles[d] = TILE.FLOOR;                                  // restore for now
+    if (dist[stairsI] < 0) continue;                        // closing it would gate the stairs — reject
+    const V = [];
+    // exclude d itself (it also flunks the flood while closed, but it becomes the door)
+    for (let i = 0; i < tiles.length; i++) if (i !== d && tileWalkable(tiles[i]) && dist[i] < 0) V.push(i);
+    if (V.length < minVault || V.length > maxVault) continue; // too small / too much of the map
+
+    // Commit: lock the door.
+    tiles[d] = TILE.DOOR;
+    const vFree = V.filter((i) => !occupied.has(i));
+    rng.items.shuffle(vFree);
+    let vi = 0;
+    // Vault loot: 1-3 strong items (deeper floors more).
+    const lootPool = VAULT_LOOT.filter((id) => depth >= ITEM_DEFS[id].depthMin && depth <= ITEM_DEFS[id].depthMax);
+    const nLoot = 1 + (depth >= 5 ? 1 : 0) + (rng.items.chance(0.4) ? 1 : 0);
+    for (let k = 0; k < nLoot && vi < vFree.length && lootPool.length; k++) {
+      const i = vFree[vi++];
+      items.push({ iid: nextIid++, x: i % MAP_W, y: (i / MAP_W) | 0, defId: rng.items.pick(lootPool) });
+      occupied.add(i);
+    }
+    // Optional guard, dormant behind the door until you open it.
+    if (rng.spawns.chance(0.6) && vi < vFree.length) {
+      const i = vFree[vFree.length - 1];
+      if (!occupied.has(i)) {
+        const pool = Object.keys(ENEMY_TYPES).filter((t) => !ENEMY_TYPES[t].boss && ENEMY_TYPES[t].debut <= depth);
+        const gid = enemies.reduce((m, e) => Math.max(m, e.id), -1) + 1;
+        enemies.push(makeEnemy(gid, i % MAP_W, (i / MAP_W) | 0, rng.spawns.pick(pool), depth));
+        occupied.add(i);
+      }
+    }
+    // Key on a tile reachable WITH THE DOOR CLOSED (dist>0), so no softlock.
+    const keyCands = [];
+    for (let i = 0; i < tiles.length; i++) if (tiles[i] === TILE.FLOOR && dist[i] > 0 && !occupied.has(i)) keyCands.push(i);
+    keyCands.sort((a, b) => a - b);
+    rng.items.shuffle(keyCands);
+    if (!keyCands.length) { tiles[d] = TILE.FLOOR; return null; } // couldn't place a key: unlock, no vault
+    const ki = keyCands[0];
+    items.push({ iid: nextIid++, x: ki % MAP_W, y: (ki / MAP_W) | 0, defId: "iron_key" });
+    occupied.add(ki);
+    // Safety: make sure at least one HEALING item is reachable without the vault.
+    if (!items.some((it) => isHealItem(it.defId) && dist[idx(it.x, it.y)] > 0) && keyCands.length > 1) {
+      const hi = keyCands[1];
+      items.push({ iid: nextIid++, x: hi % MAP_W, y: (hi / MAP_W) | 0, defId: "healing_potion" });
+    }
+    return { door: { x: d % MAP_W, y: (d / MAP_W) | 0 }, key: { x: ki % MAP_W, y: (ki / MAP_W) | 0 }, vault: V };
+  }
+  return null;
+}
 
 // One generation attempt. Returns null if the layout fails validation, so the
 // caller can retry with a fresh sub-seed rather than shipping a broken floor.
@@ -693,8 +794,11 @@ function generateAttempt(seedString, depth, rng) {
 
   const enemies = placeEnemies(rng.spawns, tiles, rooms, spawnRoom, spawn, dist, depth);
   const items = placeItems(rng.items, tiles, spawn, stairs, enemies, depth);
+  // A locked vault (door + key + loot) when the layout allows one. Mutates tiles,
+  // items and enemies in place; boss floors stay clean set-pieces (no vault).
+  const vault = isBossFloor(depth) ? null : placeLockedVault(rng, tiles, rooms, spawn, stairs, enemies, items, depth);
 
-  return { tiles, w: MAP_W, h: MAP_H, rooms, spawn, spawnRoom, stairs, dist, depth, enemies, items };
+  return { tiles, w: MAP_W, h: MAP_H, rooms, spawn, spawnRoom, stairs, dist, depth, enemies, items, vault };
 }
 
 // Public generator: retries with a derived sub-seed on failure, LOUDLY, so a
@@ -733,6 +837,7 @@ function createGame(seedString, depth = 1) {
       weaponBonus: 0, weaponName: "fists", weaponTier: -1, attackBonus: 0, regen: 0,
     },
     inventory: [],   // [{ defId, count }]
+    keys: 0,         // carried keys (open locked doors); not an inventory slot
     turn: 0, ticks: 0, kills: 0, itemsFound: 0, gameOver: false, overReason: null,
     won: false, endless: false,
     messages: [],
@@ -768,6 +873,7 @@ function descend(g) {
   p.weaponBonus = o.weaponBonus; p.weaponName = o.weaponName; p.weaponTier = o.weaponTier;
   p.attackBonus = o.attackBonus; p.regen = o.regen; p.energy = 0; p.alive = true;
   next.inventory = g.inventory.map((s) => ({ ...s }));
+  next.keys = g.keys; // keys carry down (a spare opens the next floor's vault early)
   next.turn = g.turn; next.kills = g.kills; next.itemsFound = g.itemsFound;
   next.endless = g.endless;
   next.messages = g.messages;
@@ -805,7 +911,7 @@ function computeFOV(tiles, ox, oy, radius = FOV_RADIUS) {
   const vis = new Uint8Array(MAP_W * MAP_H);
   if (!inBounds(ox, oy)) return vis;
   vis[idx(ox, oy)] = 1; // observer always sees its own cell
-  const isWall = (x, y) => !inBounds(x, y) || tiles[idx(x, y)] === TILE.WALL;
+  const isWall = (x, y) => !inBounds(x, y) || blocksSight(tiles[idx(x, y)]);
   const reveal = (x, y) => { if (inBounds(x, y)) vis[idx(x, y)] = 1; };
   const r2 = radius * radius;
 
@@ -847,13 +953,13 @@ function computeFOV(tiles, ox, oy, radius = FOV_RADIUS) {
   for (let y = 0; y < MAP_H; y++) {
     for (let x = 0; x < MAP_W; x++) {
       const i = idx(x, y);
-      if (!snap[i] || (x === ox && y === oy) || tiles[i] === TILE.WALL) continue;
+      if (!snap[i] || (x === ox && y === oy) || blocksSight(tiles[i])) continue;
       const man = Math.abs(x - ox) + Math.abs(y - oy);
       let supported = false;
       for (const [dx, dy] of DIRS4) {
         const nx = x + dx, ny = y + dy;
         if (Math.abs(nx - ox) + Math.abs(ny - oy) < man &&
-            inBounds(nx, ny) && snap[idx(nx, ny)] && tiles[idx(nx, ny)] !== TILE.WALL) { supported = true; break; }
+            inBounds(nx, ny) && snap[idx(nx, ny)] && !blocksSight(tiles[idx(nx, ny)])) { supported = true; break; }
       }
       if (!supported) vis[i] = 0;
     }
@@ -1035,6 +1141,18 @@ function propagateAlert(g, flow) {
   }
 }
 
+// Pack behaviour: when one pack member (e.g. a hound) sights the player, the WHOLE
+// pack of that type across the floor howls and converges — regardless of distance.
+// They head for the player's position-at-howl (searching), not a psychic true
+// position, so they can still be led astray around corners.
+function propagatePackAlert(g, typeId) {
+  for (const o of g.enemies) {
+    if (!o.alive || o.typeId !== typeId) continue;
+    if (o.state === "hunting" || o.state === "alerted") continue; // already engaged
+    o.state = "searching"; o.lastKnown = { x: g.player.x, y: g.player.y }; o.searchTurns = SEARCH_TURNS;
+  }
+}
+
 // Move an enemy to its first candidate not blocked by an ally (live occupancy is
 // what stops stacking and conga lines under the interleaved scheduler).
 function moveEnemy(g, e, cands) {
@@ -1060,7 +1178,7 @@ function enemyAct(g, e) {
   const flow = updateFlow(g);
   e.justAlerted = false;
   enemyThink(g, e, flow);
-  if (e.justAlerted) propagateAlert(g, flow);
+  if (e.justAlerted) { propagateAlert(g, flow); if (t.pack) propagatePackAlert(g, e.typeId); }
 
   const aware = e.state === "hunting" || e.state === "alerted";
   const cheby = Math.max(Math.abs(e.x - g.player.x), Math.abs(e.y - g.player.y));
@@ -1242,6 +1360,21 @@ function playerMove(g, dx, dy) {
   const nx = g.player.x + dx, ny = g.player.y + dy;
   const target = g.enemies.find((e) => e.alive && e.x === nx && e.y === ny);
   if (target) { attack(g, g.player, target); endPlayerAction(g); return true; }
+  // A locked door: spend a key to open it (and step through), else it blocks.
+  if (inBounds(nx, ny) && g.tiles[idx(nx, ny)] === TILE.DOOR) {
+    if (g.keys > 0) {
+      g.keys--;
+      g.tiles[idx(nx, ny)] = TILE.FLOOR;   // unlocked — the door tile is now floor
+      g.flow = null; g.flowFrom = -1;      // terrain changed: drop the cached flow field
+      g._sfCache = new Map();              // and the search-field cache
+      pushMsg(g, "You unlock the door.");
+      tryMovePlayer(g, dx, dy);            // step through in the same turn
+      endPlayerAction(g);
+      return true;
+    }
+    pushMsg(g, "The door is locked. Find a key.");
+    return false; // no turn spent
+  }
   if (tryMovePlayer(g, dx, dy)) { endPlayerAction(g); return true; }
   return false; // blocked wall: no turn consumed
 }
@@ -1251,6 +1384,15 @@ function playerPickup(g) {
   const it = itemAt(g, g.player.x, g.player.y);
   if (!it) { pushMsg(g, "Nothing here to pick up."); return false; }
   const def = ITEM_DEFS[it.defId];
+  // Keys aren't a pack slot — they add to a carried key count that opens doors.
+  if (def.kind === "key") {
+    g.keys++;
+    g.items = g.items.filter((o) => o !== it);
+    g.itemsFound++;
+    pushMsg(g, `You pick up a key.`);
+    endPlayerAction(g);
+    return true;
+  }
   // Weapons don't take a pack slot — a weapon drop evolves the one weapon you
   // carry up WEAPON_LADDER, so every one you find is progress, not clutter.
   if (def.kind === "weapon") {
@@ -1443,13 +1585,17 @@ function generateReport(n = 1000, maxDepth = 10) {
 
     // Per-floor invariants (test 3): connectivity, no entity in a wall,
     // stairs reachable and far enough, no key/door softlock.
-    const dist = bfsDistance(f.tiles, [idx(f.spawn.x, f.spawn.y)]);
+    // distOpen ignores doors (every door open) — for "no isolated pocket" and stairs
+    // distance; dist keeps doors closed — for opening-fairness and the softlock check.
+    const spawnI2 = idx(f.spawn.x, f.spawn.y);
+    const distOpen = bfsDistance(f.tiles, [spawnI2], tilePassableOpen);
+    const dist = bfsDistance(f.tiles, [spawnI2]);
     let floorTiles = 0, reach = 0;
-    for (let k = 0; k < f.tiles.length; k++) if (tileWalkable(f.tiles[k])) { floorTiles++; if (dist[k] >= 0) reach++; }
+    for (let k = 0; k < f.tiles.length; k++) if (tileWalkable(f.tiles[k])) { floorTiles++; if (distOpen[k] >= 0) reach++; }
     if (reach !== floorTiles) failures.push({ seed, depth, error: "not fully connected" });
     if (!tileWalkable(f.tiles[idx(f.spawn.x, f.spawn.y)])) failures.push({ seed, depth, error: "spawn in wall" });
     if (f.tiles[idx(f.stairs.x, f.stairs.y)] !== TILE.STAIRS) failures.push({ seed, depth, error: "stairs not placed" });
-    if (dist[idx(f.stairs.x, f.stairs.y)] < requiredStairDist(depth)) failures.push({ seed, depth, error: "stairs too close" });
+    if (distOpen[idx(f.stairs.x, f.stairs.y)] < requiredStairDist(depth)) failures.push({ seed, depth, error: "stairs too close" });
     // Enemy placement rules (now real, as promised when the framework was built):
     // on a walkable tile, >=6 path-tiles from spawn, out of spawn's line of sight,
     // and never in the spawn room.
@@ -1470,8 +1616,18 @@ function generateReport(n = 1000, maxDepth = 10) {
     if (!f.items.some((it) => isHealItem(it.defId))) failures.push({ seed, depth, error: "no healing item" });
     if (depth % 2 === 1 && !f.items.some((it) => isWeaponOrUpgrade(it.defId)))
       failures.push({ seed, depth, error: "no weapon/upgrade on odd floor" });
-    // key/door softlock: no locked doors exist yet. Nothing to check — asserted
-    // honestly rather than faked as passing.
+    // key/door softlock (now real): with every door CLOSED, the stairs and every
+    // key must still be reachable from spawn — so a locked vault can never trap the
+    // run. (Vault loot behind the door is allowed to be unreachable without a key.)
+    let hasDoor = false;
+    for (let k = 0; k < f.tiles.length; k++) if (f.tiles[k] === TILE.DOOR) { hasDoor = true; break; }
+    if (hasDoor) {
+      if (dist[idx(f.stairs.x, f.stairs.y)] < 0) failures.push({ seed, depth, error: "stairs gated behind a locked door" });
+      for (const it of f.items) {
+        if (ITEM_DEFS[it.defId].kind === "key" && dist[idx(it.x, it.y)] < 0)
+          failures.push({ seed, depth, error: "key gated behind the door it opens (softlock)" });
+      }
+    }
   }
 
   times.sort((a, b) => a - b);
@@ -1755,6 +1911,24 @@ function runTests() {
     check("enemies never stack on one tile (clumping handled)", !stacked);
   }
 
+  // Pack behaviour: when one hound sights the player, the whole hound pack across
+  // the floor is roused (even ones far past sound range), while a lone non-pack
+  // grunt sitting the same distance away stays idle.
+  {
+    const g = createGame("pack", 2);
+    const P = g.player;
+    g.enemies = [
+      makeEnemy(0, P.x + 2, P.y, "hound"),      // will see the player
+      makeEnemy(1, P.x + 12, P.y + 12, "hound"), // far pack member
+      makeEnemy(2, P.x - 12, P.y - 12, "grunt"), // far non-pack control
+    ];
+    g.flow = null;
+    enemyAct(g, g.enemies[0]);
+    check("pack: a hound sighting rouses the whole pack, not lone non-pack foes",
+      g.enemies[1].state !== "idle" && g.enemies[2].state === "idle",
+      "states=" + g.enemies.map((e) => e.state).join(","));
+  }
+
   // Test 8: the energy invariant. A 150-speed actor acts exactly twice as often
   // as a 75-speed one over 1000 ticks.
   {
@@ -1831,7 +2005,7 @@ function runTests() {
 // NOT recomputed at boot. Any code change that alters generation flips the live
 // hash away from this frozen value and test 1b catches it. Re-pin deliberately
 // (run ?test=1, read the reported value) when a generation change is intended.
-const EXPECTED_HELLO_D1 = 0x4B87EE43 >>> 0; // seed "hello-world", depth 1 (terrain + enemies + items)
+const EXPECTED_HELLO_D1 = 0x02AEED73 >>> 0; // seed "hello-world", depth 1 (terrain + enemies + items + locked vault). Re-pinned when locked doors/keys were added.
 
 // SOURCE_TEXT is filled in by the environment: the browser reads its own
 // <script>, Node passes the file text in. Test 5 greps it.
@@ -1871,7 +2045,7 @@ if (typeof document !== "undefined") {
 
   // Bump this on every deploy — shown de-emphasised in the help panel so you can
   // confirm the home-screen app actually reloaded the latest build.
-  const APP_VERSION = "build 10 · 2026-09-03";
+  const APP_VERSION = "build 11 · 2026-09-03";
 
   let game;
   const debugState = { revealAll: false, flow: false };
@@ -1997,6 +2171,7 @@ if (typeof document !== "undefined") {
       `<div class="hptext">${Math.max(0, p.hp)} / ${p.maxHp} HP</div></div>` +
       `<div class="muted">atk ${4 + p.weaponBonus + p.attackBonus} · ${escapeHtml(p.weaponName)}` +
       (p.regen > 0 ? ` · regen ${p.regen}` : "") +
+      (game.keys > 0 ? ` · <span style="color:#ffe066">🔑${game.keys}</span>` : "") +
       ` · d${game.depth}${game.endless ? "∞" : "/" + RL.FINAL_DEPTH} · t${game.turn} · k${game.kills}${bossBadge}</div>` +
       (game.gameOver && !game.won ? `<div class="dead">YOU DIED — press New run</div>` : "");
 
@@ -2061,8 +2236,8 @@ if (typeof document !== "undefined") {
   // (remembered — terrain only, no entities), and unknown (black). Debug
   // reveal-all promotes everything to LIT.
   const PALETTE = {
-    lit:  { [TILE.WALL]: "#2a3346", [TILE.FLOOR]: "#0f1420", [TILE.STAIRS]: "#0f1420" },
-    dim:  { [TILE.WALL]: "#161b26", [TILE.FLOOR]: "#0a0d13", [TILE.STAIRS]: "#0a0d13" },
+    lit:  { [TILE.WALL]: "#2a3346", [TILE.FLOOR]: "#0f1420", [TILE.STAIRS]: "#0f1420", [TILE.DOOR]: "#5a4326" },
+    dim:  { [TILE.WALL]: "#161b26", [TILE.FLOOR]: "#0a0d13", [TILE.STAIRS]: "#0a0d13", [TILE.DOOR]: "#2f2417" },
   };
 
   function draw() {
@@ -2088,6 +2263,11 @@ if (typeof document !== "undefined") {
           ctx.font = "bold 13px ui-monospace, monospace";
           ctx.textAlign = "center"; ctx.textBaseline = "middle";
           ctx.fillText(">", x * CELL + CELL / 2, y * CELL + CELL / 2 + 1);
+        } else if (t === TILE.DOOR) {
+          ctx.fillStyle = lit ? "#e0a94d" : "#6a5330"; // a locked door reads brown among grey walls
+          ctx.font = "bold 13px ui-monospace, monospace";
+          ctx.textAlign = "center"; ctx.textBaseline = "middle";
+          ctx.fillText("+", x * CELL + CELL / 2, y * CELL + CELL / 2 + 1);
         }
       }
     }
