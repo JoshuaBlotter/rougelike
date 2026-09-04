@@ -84,6 +84,27 @@
   .card .opt span { color: #6b7688; font-size: 11px; }
   .card .opt.sel { border-color: #2f6d4a; background: #16241c; }
   .card .opt.sel b { color: #8ef0a0; }
+  /* End-of-run score readout + personal-best badge. */
+  .card .scoreBig { font-size: 30px; font-weight: bold; color: #ffe066; letter-spacing: 1px; margin: 2px 0 4px; }
+  .card .scoreBig .scoreLbl { font-size: 13px; color: #6b7688; font-weight: normal; letter-spacing: 0; }
+  .card .pbBadge { color: #ffd43b; font-weight: bold; letter-spacing: 1px; font-size: 12px; margin-bottom: 8px; }
+
+  /* Runs panel: recent-runs leaderboard, defaulting to the current difficulty. */
+  #runsPanel .runsHead { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+  #runsFilter button { font-size: 11px; padding: 2px 6px; margin-left: 3px; }
+  #runsFilter button.sel { border-color: #2f6d4a; background: #16241c; color: #8ef0a0; }
+  #runsStat { font-size: 11px; margin-bottom: 6px; }
+  #runsList { font-size: 12px; }
+  .runRow { display: grid; grid-template-columns: auto 1fr auto; gap: 6px; align-items: baseline;
+            padding: 3px 4px; border-radius: 3px; cursor: pointer; }
+  .runRow:hover { background: #1a2130; }
+  .runRow.pb { background: #16241c; }
+  .runRow .rk { color: #6b7688; width: 18px; text-align: right; }
+  .runRow .rscore { color: #ffe066; font-weight: bold; }
+  .runRow.pb .rscore { color: #ffd43b; }
+  .runRow .rmeta { color: #6b7688; }
+  .runRow .rseed { color: #9fd3ff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #runsList .empty { color: #6b7688; font-size: 12px; }
 
   /* touch controls — shown on coarse pointers / small screens only. The center
      button is a context-aware Interact: pick up / descend / wait, self-labelling. */
@@ -118,8 +139,9 @@
     #touch     { order: 3; margin: 4px 0; }
     #inv       { order: 4; margin: 0; }
     #seedPanel { order: 5; margin: 0; }
-    #helpPanel { order: 6; margin: 0; }
-    #debugWrap { order: 7; margin: 0; }
+    #runsPanel { order: 6; margin: 0; }
+    #helpPanel { order: 7; margin: 0; }
+    #debugWrap { order: 8; margin: 0; }
     #hud .hpbar { margin: 0 0 4px; }
     /* square canvas that fits either orientation and always leaves room for controls.
        dvh tracks the *visible* viewport, so it fits even while Safari shows its bar. */
@@ -139,7 +161,7 @@
     #stage, #game { width: min(52vw, 82vh); }
     #stage, #game { width: min(52vw, 82dvh); }
     #touch     { order: 3; flex: 0 0 auto; margin: 0 0 0 12px; }
-    #inv, #seedPanel, #helpPanel, #debugWrap { order: 4; flex: 1 1 100%; }
+    #inv, #seedPanel, #runsPanel, #helpPanel, #debugWrap { order: 4; flex: 1 1 100%; }
   }
 </style>
 
@@ -166,11 +188,19 @@
     <h1>SEEDED ROGUELIKE</h1>
     <div class="panel" id="seedPanel">
       <div class="muted">seed</div>
-      <div class="row"><input id="seedInput" spellcheck="false"><button id="seedGo">New run</button><button id="setupBtn" title="choose class & difficulty">⚙</button><button id="soundBtn" title="toggle sound">🔊</button></div>
+      <div class="row"><input id="seedInput" spellcheck="false"><button id="seedGo">New run</button><button id="dailyGo" title="today's shared dungeon (same for everyone, UTC)">Daily run</button><button id="setupBtn" title="choose class & difficulty">⚙</button><button id="soundBtn" title="toggle sound">🔊</button></div>
       <div class="muted">Current: <code id="seedShow">—</code> · <span id="loadoutShow"></span>depth <span id="depthShow">1</span></div>
     </div>
     <div class="panel" id="hud"></div>
     <div class="panel" id="inv"></div>
+    <div class="panel" id="runsPanel">
+      <div class="runsHead">
+        <span class="muted">Runs</span>
+        <span id="runsFilter"></span>
+      </div>
+      <div id="runsStat" class="muted"></div>
+      <div id="runsList"></div>
+    </div>
     <div class="panel" id="debugWrap">
       <div class="muted" style="margin-bottom:6px">Debug (?debug=1)</div>
       <div id="debugPanel" class="muted">disabled</div>
@@ -287,6 +317,28 @@ function makeStreams(seedString, depth) {
   return streams;
 }
 
+// Daily seed: one dungeon per UTC calendar day. Everyone who presses "Daily
+// run" on the same UTC day derives the SAME seed string ("daily-YYYY-MM-DD"),
+// and — by determinism — the byte-identical dungeon, so a player in Payson and
+// a player in Tokyo can compare on the same puzzle. UTC (not local time) is the
+// invariant that makes them comparable; local derivation would silently split
+// the day across timezones. Choosing a seed string is outside the sim, so this
+// is a plain seed with zero hash/determinism impact — fnv1a hashes it as-is.
+// `date` is injectable for tests; it defaults to the wall clock.
+function dailyDate(date = new Date()) {
+  return date.toISOString().slice(0, 10); // "YYYY-MM-DD" — toISOString is always UTC
+}
+function dailySeed(date = new Date()) {
+  return "daily-" + dailyDate(date);
+}
+// If a seed string names a daily (from the button or a shared ?seed=daily-...
+// URL), pull the date back out so the run can be flagged and grouped. Returns
+// the "YYYY-MM-DD" string, or null for an ordinary seed.
+function parseDailyDate(seedString) {
+  const m = /^daily-(\d{4}-\d{2}-\d{2})$/.exec(String(seedString));
+  return m ? m[1] : null;
+}
+
 /* =========================================================================
  * CONTENT TABLES  —  data-driven, top of file
  * =======================================================================*/
@@ -325,7 +377,19 @@ const GEN = {
   loopFraction: 0.15,     // extra non-tree edges added back, as a fraction of room count
   widenChance: 0.18,      // fraction of corridors widened to 2 tiles
   maxRegens: 5,           // beyond this, the generator is considered broken
+  // Organic (cave) rooms: a seeded per-room chance to carve a cellular-automata
+  // blob instead of a rectangle. Higher on deeper floors. Only rooms at least
+  // caveMinW x caveMinH roll for it, so small rooms never erode to a single tile.
+  caveChanceBase: 0.12,   // chance at depth 1
+  caveChancePerDepth: 0.035,
+  caveChanceMax: 0.55,
+  caveFill: 0.40,         // initial wall probability inside the bbox
+  cavePasses: 3,          // smoothing passes (>=5 wall neighbours -> wall)
+  caveMinW: 7, caveMinH: 5,
 };
+function caveChance(depth) {
+  return Math.min(GEN.caveChanceMax, GEN.caveChanceBase + GEN.caveChancePerDepth * (depth - 1));
+}
 // Stairs must be at least this many tiles of PATH distance from spawn, scaled
 // by depth, so deeper floors force a longer traverse.
 function requiredStairDist(depth) { return 8 + Math.floor(depth * 1.5); }
@@ -555,6 +619,59 @@ function carveCorridor(tiles, rng, ax, ay, bx, by, wide) {
   // Seeded choice of which leg goes first — bends the corridor left or up first.
   if (rng.chance(0.5)) { hLeg(ay, ax, bx); vLeg(bx, ay, by); }
   else { vLeg(ax, ay, by); hLeg(by, ax, bx); }
+}
+
+// Carve an organic cave into a room's bounding box in place of the rectangle.
+// Seed the box with noise (rng.map), run a few cellular-automata smoothing passes
+// to round the edges, then keep ONLY the floor component connected to the room's
+// center — the tile corridors, spawn and stairs all key off. That prunes any
+// internal floor pocket the CA leaves, so a cave can never strand a tile on its
+// own; the global validator remains the backstop for the rare degenerate blob.
+function carveCaveRoom(rng, tiles, r) {
+  const w = r.w, h = r.h;
+  let grid = [];
+  for (let y = 0; y < h; y++) {
+    const row = [];
+    for (let x = 0; x < w; x++) row.push(rng.chance(GEN.caveFill)); // true = wall
+    grid.push(row);
+  }
+  const wallAt = (g, x, y) => (x < 0 || y < 0 || x >= w || y >= h) ? true : g[y][x];
+  for (let pass = 0; pass < GEN.cavePasses; pass++) {
+    const next = [];
+    for (let y = 0; y < h; y++) {
+      const row = [];
+      for (let x = 0; x < w; x++) {
+        let n = 0;
+        for (let dy = -1; dy <= 1; dy++)
+          for (let dx = -1; dx <= 1; dx++)
+            if ((dx || dy) && wallAt(grid, x + dx, y + dy)) n++;
+        row.push(n >= 5); // out-of-box counts as wall, so edges erode inward
+      }
+      next.push(row);
+    }
+    grid = next;
+  }
+  // The room center is guaranteed floor (it anchors corridors/spawn/stairs).
+  const lcx = (w >> 1), lcy = (h >> 1);
+  grid[lcy][lcx] = false;
+  // Flood-fill floor from center; anything not reached is filled back to wall.
+  const keep = [];
+  for (let y = 0; y < h; y++) keep.push(new Array(w).fill(false));
+  const stack = [[lcx, lcy]];
+  keep[lcy][lcx] = true;
+  while (stack.length) {
+    const [cx, cy] = stack.pop();
+    for (const [dx, dy] of DIRS4) {
+      const nx = cx + dx, ny = cy + dy;
+      if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+      if (keep[ny][nx] || grid[ny][nx]) continue;
+      keep[ny][nx] = true;
+      stack.push([nx, ny]);
+    }
+  }
+  for (let y = 0; y < h; y++)
+    for (let x = 0; x < w; x++)
+      tiles[idx(r.x + x, r.y + y)] = keep[y][x] ? TILE.FLOOR : TILE.WALL;
 }
 
 // BFS distance field over 4-connectivity. -1 means unreachable. `passable` decides
@@ -805,9 +922,17 @@ function generateAttempt(seedString, depth, rng) {
   const rooms = placeRooms(rng.map);
   if (rooms.length < 2) return null;
 
-  for (const r of rooms)
-    for (let y = r.y; y <= r.y2; y++)
-      for (let x = r.x; x <= r.x2; x++) tiles[idx(x, y)] = TILE.FLOOR;
+  // Each room is a rectangle, unless it's big enough and its seeded roll says
+  // carve a cave instead. The cave chance rises with depth. One chance per
+  // eligible room, consumed from rng.map, keeps generation deterministic.
+  for (const r of rooms) {
+    if (r.w >= GEN.caveMinW && r.h >= GEN.caveMinH && rng.map.chance(caveChance(depth))) {
+      carveCaveRoom(rng.map, tiles, r);
+    } else {
+      for (let y = r.y; y <= r.y2; y++)
+        for (let x = r.x; x <= r.x2; x++) tiles[idx(x, y)] = TILE.FLOOR;
+    }
+  }
 
   const tree = buildMST(rooms);
   const extra = loopEdges(rooms, tree);
@@ -876,6 +1001,12 @@ function createGame(seedString, depth = 1, opts = {}) {
   const g = {
     seed: String(seedString),
     depth,
+    // Daily flag is derived from the seed string itself, so both the "Daily
+    // run" button and a shared ?seed=daily-YYYY-MM-DD URL mark the run as a
+    // daily — letting Milestone 10's history group attempts and surface a
+    // per-day best. Purely descriptive: it never touches generation.
+    isDaily: parseDailyDate(seedString) !== null,
+    dailyDate: parseDailyDate(seedString),
     difficulty: DIFFICULTIES[opts.difficulty] ? opts.difficulty : DEFAULT_DIFFICULTY,
     classId: CLASSES[opts.classId] ? opts.classId : null,
     floor,
@@ -890,6 +1021,11 @@ function createGame(seedString, depth = 1, opts = {}) {
     inventory: [],   // [{ defId, count }]
     keys: 0,         // carried keys (open locked doors); not an inventory slot
     turn: 0, ticks: 0, kills: 0, itemsFound: 0, gameOver: false, overReason: null,
+    // Score inputs (Milestone 10). excessWeapons/excessShards count "margin" pickups
+    // that moved nothing (already Pristine / already at MAX_ATTACK_BONUS) — a minor
+    // bonus for over-provisioning that still costs turns to grab. computeScore reads
+    // these + turn/kills/keys at run end; they never touch generation or the hash.
+    excessWeapons: 0, excessShards: 0,
     won: false, endless: false,
     messages: [],
     visible: null,
@@ -942,6 +1078,7 @@ function descend(g) {
   next.inventory = g.inventory.map((s) => ({ ...s }));
   next.keys = g.keys; // keys carry down (a spare opens the next floor's vault early)
   next.turn = g.turn; next.kills = g.kills; next.itemsFound = g.itemsFound;
+  next.excessWeapons = g.excessWeapons; next.excessShards = g.excessShards; // score counters carry the whole run
   next.endless = g.endless;
   next.messages = g.messages;
   updateFOV(next);
@@ -1326,7 +1463,11 @@ function dropBossLoot(g, e) {
 function upgradeWeapon(g, tierMin = 0) {
   const p = g.player;
   const cur = p.weaponTier === undefined ? -1 : p.weaponTier;
-  const next = Math.min(WEAPON_LADDER.length - 1, Math.max(cur + 1, tierMin));
+  const top = WEAPON_LADDER.length - 1;
+  // Already at the top rung: this pickup moves nothing. Count it as an overflow
+  // weapon — a minor "you had margin" score bonus that still cost a turn to grab.
+  if (cur >= top) g.excessWeapons++;
+  const next = Math.min(top, Math.max(cur + 1, tierMin));
   p.weaponTier = next;
   const w = WEAPON_LADDER[next];
   p.weaponBonus = w.bonus; p.weaponName = w.name;
@@ -1346,7 +1487,7 @@ function applyItem(g, defId) {
       pushMsg(g, `Your weapon becomes a ${w.name} (+${w.bonus}).`); break;
     }
     case "strength":
-      if (p.attackBonus >= MAX_ATTACK_BONUS) { pushMsg(g, `You already wield your full strength.`); }
+      if (p.attackBonus >= MAX_ATTACK_BONUS) { g.excessShards++; pushMsg(g, `You already wield your full strength.`); }
       else { p.attackBonus = Math.min(MAX_ATTACK_BONUS, p.attackBonus + ef.amount); pushMsg(g, `Your attacks feel stronger (+${ef.amount}).`); }
       break;
     case "regen":
@@ -1648,6 +1789,49 @@ function hashRun(seedString, depth) {
 }
 
 /* =========================================================================
+ * SCORING  —  one comparable number per finished run
+ * =======================================================================*/
+
+// Scoring philosophy: SPEED and SELF-RELIANCE win. In priority order —
+//   1. Speed        (fewer turns; the dominant lever)
+//   2. Unused keys  (skipped the vault detours; co-top with speed)
+//   3. Completion   (cleared the campaign > died deep)
+//   4. Margin       (kills + overflow weapons/shards; minor "you had room to spare")
+// The tension is deliberate: kills and overflow pickups COST turns, so they only
+// pay off on an already-efficient path — grinding for them nets negative. That is
+// the design, not a bug to tune away by inflating their weights.
+//
+// TIME_PAR is the turn count a clean campaign should land near; beating it adds
+// score, missing it never subtracts (a slow win still scores on its base).
+const TIME_PAR = 1500;                 // par turns for a full campaign
+const DIFF_MULT = { easy: 0.8, normal: 1.0, hard: 1.3 };
+
+// computeScore(g): PURE function over the end-state. Same (seed + inputs) -> same
+// number on every machine, so it's deterministic and headless-testable. The
+// renderer only DISPLAYS the result; it never lives on the sim. Returns the final
+// `score` alongside the component breakdown the end screen shows the player.
+function computeScore(g) {
+  const won        = !!g.won;
+  const depth      = g.depth | 0;                 // depth reached (== FINAL_DEPTH on a win)
+  const turns      = g.turn | 0;
+  const keysUnused = g.keys | 0;
+  const kills      = g.kills | 0;
+  const exWeapons  = g.excessWeapons | 0;
+  const exShards   = g.excessShards | 0;
+
+  const completionBase = won ? 10000 : depth * 400;
+  const timeBonus      = Math.max(0, TIME_PAR - turns) * 12;   // never negative: speed only adds
+  const keyBonus       = keysUnused * 500;                     // co-top with speed
+  const killScore      = kills * 15;
+  const overflowBonus  = exWeapons * 150 + exShards * 120;
+  const raw            = completionBase + timeBonus + keyBonus + killScore + overflowBonus;
+
+  const mult  = DIFF_MULT[g.difficulty] != null ? DIFF_MULT[g.difficulty] : 1.0;
+  const score = Math.round(raw * mult);
+  return { score, raw, mult, completionBase, timeBonus, keyBonus, killScore, overflowBonus };
+}
+
+/* =========================================================================
  * TESTS  —  runTests() from console or ?test=1
  * =======================================================================*/
 
@@ -1899,6 +2083,34 @@ function runTests() {
   check("2. 200 seeds -> 200 distinct hashes", seen.size === 200,
         "distinct=" + seen.size + " collisions=" + collisions);
 
+  // Daily seed (Milestone 9): the date->seed derivation is stable and UTC-based.
+  {
+    // Same calendar day (UTC) -> identical seed string, regardless of the time
+    // of day. Two instants ~23h apart on the same UTC date must collapse to one.
+    const morning = new Date("2026-09-04T00:30:00Z");
+    const night   = new Date("2026-09-04T23:30:00Z");
+    check("daily: same UTC day -> identical seed",
+          dailySeed(morning) === "daily-2026-09-04" && dailySeed(night) === "daily-2026-09-04",
+          dailySeed(morning) + " vs " + dailySeed(night));
+    // UTC, not local: an instant that is a DIFFERENT local calendar day in most
+    // western zones is still derived from its UTC date. 2026-09-04T02:00Z is
+    // still Sep 3 in Payson (UTC-6), but the daily is keyed to UTC -> Sep 4.
+    check("daily: derivation is UTC-based, not local",
+          dailySeed(new Date("2026-09-04T02:00:00Z")) === "daily-2026-09-04",
+          dailySeed(new Date("2026-09-04T02:00:00Z")));
+    // The seed round-trips: pressing "Daily run" and sharing ?seed=daily-<date>
+    // must produce the byte-identical dungeon. This falls out of determinism
+    // (both are the same seed string), asserted once here at the floor-hash level.
+    check("daily: ?seed=daily-<date> == Daily run (byte-identical floor)",
+          hashRun(dailySeed(morning), 1) === hashRun("daily-2026-09-04", 1));
+    // The flag is derived from the seed, so a shared daily URL groups like the
+    // button's run does; an ordinary seed is not flagged.
+    const dg = createGame("daily-2026-09-04", 1), og = createGame("ordinary", 1);
+    check("daily: run is flagged with its date; non-daily is not",
+          dg.isDaily === true && dg.dailyDate === "2026-09-04" &&
+          og.isDaily === false && og.dailyDate === null);
+  }
+
   // Test 5: source never calls the built-in JS RNG. Pattern built from parts so
   // this line does not itself contain the literal it forbids.
   const forbiddenRng = new RegExp("Math" + "\\s*\\.\\s*" + "random");
@@ -2090,6 +2302,38 @@ function runTests() {
         (rep.failures[0] ? JSON.stringify(rep.failures[0]) : "none"));
   check("4. generation under 50ms at p95", rep.p95 < 50, "p95=" + rep.p95.toFixed(2) + "ms max=" + rep.max.toFixed(2));
 
+  // Milestone 10: computeScore is a pure, deterministic function over the end-state,
+  // and it encodes the scoring PRIORITY (speed & keys on top, difficulty scaling).
+  // Synthetic end-states are plain objects — computeScore reads only score inputs.
+  {
+    const base = { won: true, depth: FINAL_DEPTH, turn: 800, keys: 2, kills: 40,
+                   excessWeapons: 1, excessShards: 1, difficulty: "normal" };
+    // Pure/deterministic: identical end-state -> identical score.
+    check("score: pure — identical end-state yields identical score",
+          computeScore(base).score === computeScore({ ...base }).score);
+    // Speed dominance: fewer turns, all else equal -> strictly higher.
+    const fast = computeScore({ ...base, turn: 700 }).score;
+    const slow = computeScore({ ...base, turn: 900 }).score;
+    check("score: fewer turns scores strictly higher (speed dominates)", fast > slow,
+          "fast=" + fast + " slow=" + slow);
+    // A slow win never scores below its base: timeBonus floors at 0, never negative.
+    const slowWin = computeScore({ ...base, turn: TIME_PAR + 5000, keys: 0, kills: 0, excessWeapons: 0, excessShards: 0 });
+    check("score: slow win still scores its completion base (timeBonus >= 0)",
+          slowWin.timeBonus === 0 && slowWin.score === Math.round(10000 * DIFF_MULT.normal),
+          JSON.stringify(slowWin));
+    // Keys: more unused keys, all else equal -> strictly higher.
+    const moreKeys = computeScore({ ...base, keys: 3 }).score;
+    const fewKeys  = computeScore({ ...base, keys: 1 }).score;
+    check("score: more unused keys scores strictly higher", moreKeys > fewKeys,
+          "more=" + moreKeys + " few=" + fewKeys);
+    // Difficulty ordering: identical raw run -> easy < normal < hard.
+    const e = computeScore({ ...base, difficulty: "easy" }).score;
+    const n = computeScore({ ...base, difficulty: "normal" }).score;
+    const h = computeScore({ ...base, difficulty: "hard" }).score;
+    check("score: difficulty ordering easy < normal < hard for identical run",
+          e < n && n < h, `easy=${e} normal=${n} hard=${h}`);
+  }
+
   const summary = `TESTS: ${pass} passed, ${fail} failed`;
   const report = summary + "\n" + results.join("\n");
   if (typeof console !== "undefined") console.log(report);
@@ -2100,7 +2344,7 @@ function runTests() {
 // NOT recomputed at boot. Any code change that alters generation flips the live
 // hash away from this frozen value and test 1b catches it. Re-pin deliberately
 // (run ?test=1, read the reported value) when a generation change is intended.
-const EXPECTED_HELLO_D1 = 0x02AEED73 >>> 0; // seed "hello-world", depth 1 (terrain + enemies + items + locked vault). Re-pinned when locked doors/keys were added.
+const EXPECTED_HELLO_D1 = 0xE5EDF52A >>> 0; // seed "hello-world", depth 1 (terrain + enemies + items + locked vault). Re-pinned when organic cave rooms (M8b) changed terrain generation.
 
 // SOURCE_TEXT is filled in by the environment: the browser reads its own
 // <script>, Node passes the file text in. Test 5 greps it.
@@ -2111,11 +2355,13 @@ let SOURCE_TEXT = "";
  * =======================================================================*/
 const API = {
   fnv1a, mulberry32, makeStream, makeStreams, mixSeed, STREAM_SALTS,
+  dailySeed, dailyDate, parseDailyDate,
   generateFloor, createGame, descend, tryMovePlayer, isWalkable, tileAt, inBounds,
   bfsDistance, computeFOV, updateFOV, FOV_RADIUS,
   distField8, updateFlow, enemyPhase, enemyAct, enemyThink, huntStep, hasLOS, enemySees, makeEnemy,
   playerMove, playerPickup, usePlayerItem, itemAt, advanceGame, nextReady, simulateEnergy, attack,
   hashRun, generateReport, balanceReport, competentBot, runTests,
+  computeScore, TIME_PAR, DIFF_MULT,
   TILE, DIRS8, DIRS4, MAP_W, MAP_H, idx, requiredStairDist, ENEMY_TYPES, ITEM_DEFS, UNREACHABLE, INV_CAP,
   FINAL_DEPTH, isBossFloor, bossForDepth,
   DIFFICULTIES, DEFAULT_DIFFICULTY, CLASSES, DEFAULT_CLASS, BOSS_LOOT,
@@ -2231,6 +2477,120 @@ if (typeof document !== "undefined") {
     } catch (_) {}
   }
 
+  /* --- Run history + score persistence (Milestone 10) --------------------
+   * All localStorage access is wrapped: a private window, cleared data, or a
+   * corrupt value degrades to an empty history and NEVER throws. Persistence is
+   * pure render-side plumbing — the sim (and computeScore) know nothing of it. */
+  const HISTORY_KEY = "rl.history", BEST_KEY = "rl.best", HISTORY_MAX = 100;
+  function loadHistory() {
+    try {
+      const arr = JSON.parse(localStorage.getItem(HISTORY_KEY));
+      return Array.isArray(arr) ? arr : [];
+    } catch (_) { return []; }
+  }
+  function saveHistory(list) {
+    try { localStorage.setItem(HISTORY_KEY, JSON.stringify(list.slice(0, HISTORY_MAX))); } catch (_) {}
+  }
+  function loadBest() {
+    try {
+      const b = JSON.parse(localStorage.getItem(BEST_KEY));
+      if (b && typeof b === "object") return { bySeed: b.bySeed || {}, byDiff: b.byDiff || {} };
+    } catch (_) {}
+    return { bySeed: {}, byDiff: {} };
+  }
+  function saveBest(b) { try { localStorage.setItem(BEST_KEY, JSON.stringify(b)); } catch (_) {} }
+
+  // Record a finished run exactly once. Returns { isBest, score } for the end
+  // screen's "new personal best" highlight. Endless runs are logged for their
+  // deepest-floor stat but do NOT feed the comparable campaign best boards — a
+  // won-campaign score and an endless-death score aren't the same currency.
+  function recordRun(g) {
+    if (g._recordInfo) return g._recordInfo;
+    const sc = RL.computeScore(g);
+    const entry = {
+      seed: g.seed, score: sc.score, depth: g.depth, won: !!g.won,
+      turns: g.turn, kills: g.kills, classId: g.classId, difficulty: g.difficulty,
+      isDaily: !!g.isDaily, endless: !!g.endless, date: new Date().toISOString(),
+    };
+    const hist = loadHistory(); hist.unshift(entry); saveHistory(hist);
+    let isBest = false;
+    if (!g.endless) { // only campaign runs are comparable
+      const best = loadBest();
+      if (!(g.seed in best.bySeed) || sc.score > best.bySeed[g.seed]) { best.bySeed[g.seed] = sc.score; isBest = true; }
+      if (!(g.difficulty in best.byDiff) || sc.score > best.byDiff[g.difficulty]) { best.byDiff[g.difficulty] = sc.score; isBest = true; }
+      saveBest(best);
+    }
+    g._recordInfo = { isBest, score: sc.score, breakdown: sc };
+    return g._recordInfo;
+  }
+
+  // One-click seed share: copy a ready-to-play URL (seed + loadout) to the
+  // clipboard, degrading to a prompt() if the async clipboard API is unavailable.
+  function shareSeed(seed, cfg, btn) {
+    const url = location.origin + location.pathname +
+      "?seed=" + encodeURIComponent(seed) +
+      (cfg && cfg.classId ? "&class=" + encodeURIComponent(cfg.classId) : "") +
+      (cfg && cfg.difficulty ? "&diff=" + encodeURIComponent(cfg.difficulty) : "");
+    const flash = () => { if (btn) { const t = btn.textContent; btn.textContent = "Copied!"; setTimeout(() => { btn.textContent = t; }, 1200); } };
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(url).then(flash, () => window.prompt("Copy this run link:", url)); return; }
+    } catch (_) {}
+    window.prompt("Copy this run link:", url);
+  }
+
+  // The Runs panel: a per-difficulty campaign leaderboard (default board = the
+  // current run's difficulty, since the difficulty multiplier only makes a single
+  // board honest). Endless legs are kept out of the score board and surfaced as a
+  // separate "deepest endless floor" stat. Clicking a row replays that seed+loadout.
+  let runsFilter = null; // difficulty id, or "all"
+  const attrEsc = (s) => escapeHtml(String(s)).replace(/"/g, "&quot;");
+  const shortDate = (iso) => { try { return String(iso).slice(0, 10); } catch (_) { return ""; } };
+  function renderRuns() {
+    const listEl = document.getElementById("runsList");
+    const filtEl = document.getElementById("runsFilter");
+    const statEl = document.getElementById("runsStat");
+    if (!listEl || !filtEl || !statEl) return;
+    if (runsFilter === null) runsFilter = (game && game.difficulty) || runConfig.difficulty || "normal";
+    const hist = loadHistory();
+
+    const mkBtn = (id, label) => `<button data-rf="${id}"${runsFilter === id ? ' class="sel"' : ""}>${label}</button>`;
+    filtEl.innerHTML = mkBtn("easy", "Easy") + mkBtn("normal", "Norm") + mkBtn("hard", "Hard") + mkBtn("all", "All");
+    filtEl.querySelectorAll("[data-rf]").forEach((b) => b.onclick = () => { runsFilter = b.dataset.rf; renderRuns(); });
+
+    const deepest = hist.filter((r) => r.endless).reduce((m, r) => Math.max(m, r.depth || 0), 0);
+    const best = loadBest();
+    const diffBest = runsFilter !== "all" ? best.byDiff[runsFilter] : undefined;
+    const dName = (id) => (DIFFICULTIES[id] ? DIFFICULTIES[id].name : id);
+    statEl.innerHTML =
+      (runsFilter !== "all" && diffBest != null
+        ? `best (${dName(runsFilter)}): <b style="color:#ffe066">${diffBest.toLocaleString()}</b>`
+        : `${hist.length} run${hist.length === 1 ? "" : "s"} logged`) +
+      (deepest > RL.FINAL_DEPTH ? ` · deepest endless: d${deepest}` : "");
+
+    let rows = hist.filter((r) => !r.endless);
+    if (runsFilter !== "all") rows = rows.filter((r) => r.difficulty === runsFilter);
+    rows.sort((a, b) => b.score - a.score);
+    rows = rows.slice(0, 12);
+    if (!rows.length) { listEl.innerHTML = `<div class="empty">No campaign runs on this board yet.</div>`; return; }
+    const clsShort  = (id) => (CLASSES[id] ? CLASSES[id].name[0] : "?");
+    const diffShort = (id) => (DIFFICULTIES[id] ? DIFFICULTIES[id].name[0] : "?");
+    listEl.innerHTML = rows.map((r, i) => {
+      const isPb = runsFilter !== "all" && diffBest != null && r.score === diffBest && i === 0;
+      const meta = `d${r.depth}${r.won ? "✓" : ""} · ${clsShort(r.classId)}` +
+        (runsFilter === "all" ? "/" + diffShort(r.difficulty) : "") +
+        ` · ${shortDate(r.date)}${r.isDaily ? " · daily" : ""}`;
+      return `<div class="runRow${isPb ? " pb" : ""}" data-seed="${attrEsc(r.seed)}" data-cls="${attrEsc(r.classId || "")}" data-diff="${attrEsc(r.difficulty || "")}" title="replay this seed">` +
+        `<span class="rk">${i + 1}</span>` +
+        `<span><span class="rscore">${r.score.toLocaleString()}</span> <span class="rmeta">${meta}</span><br>` +
+        `<span class="rseed">${escapeHtml(r.seed)}</span></span>` +
+        `<span></span></div>`;
+    }).join("");
+    listEl.querySelectorAll(".runRow").forEach((el) => el.onclick = () => {
+      const cfg = { classId: el.dataset.cls || runConfig.classId, difficulty: el.dataset.diff || runConfig.difficulty };
+      hideEnd(); newRun(el.dataset.seed, 1, cfg);
+    });
+  }
+
   const DIFF_BLURB = { easy: "+HP · weaker foes · whole map shown", normal: "the standard descent", hard: "enemies hit harder · only what you can see" };
   // Render the start-of-run chooser into the shared overlay card. Selecting an
   // option re-renders (cheap) to move the highlight; Start begins the run.
@@ -2277,7 +2637,8 @@ if (typeof document !== "undefined") {
     document.getElementById("depthShow").textContent = game.depth;
     updateLoadoutShow();
     const who = CLASSES[game.classId] ? CLASSES[game.classId].name : "adventurer";
-    game.messages = ["Welcome, " + who + ". Seed: " + game.seed];
+    game.messages = ["Welcome, " + who + ". Seed: " + game.seed +
+      (game.isDaily ? " (daily " + game.dailyDate + " — same for everyone)" : "")];
     RL.advanceGame(game); // fast-forward to the player's first turn
     if (DEBUG) RL.updateFlow(game); // populate the flow cache so the overlay shows pre-move
     resetFx();
@@ -2390,10 +2751,83 @@ if (typeof document !== "undefined") {
   // Three visibility states drive the palette: LIT (visible now), DIM
   // (remembered — terrain only, no entities), and unknown (black). Debug
   // reveal-all promotes everything to LIT.
-  const PALETTE = {
-    lit:  { [TILE.WALL]: "#2a3346", [TILE.FLOOR]: "#0f1420", [TILE.STAIRS]: "#0f1420", [TILE.DOOR]: "#5a4326" },
-    dim:  { [TILE.WALL]: "#161b26", [TILE.FLOOR]: "#0a0d13", [TILE.STAIRS]: "#0a0d13", [TILE.DOOR]: "#2f2417" },
+  //
+  // Depth-banded biomes (M8a). The floor's depth picks a band so its colour reads
+  // at a glance: stone (1–3), moss (4–6), ember (7–9), void (10–12); endless
+  // cycles the four. Each biome tints walls + floor (lit/dim), the stairs glyph,
+  // decoration props, and the damage vignette. This is render-only — biomes live
+  // inside the document guard and never touch the sim, so they can't move a hash.
+  const BIOMES = [
+    { // stone / steel-blue
+      lit:  { [TILE.WALL]: "#2a3346", [TILE.FLOOR]: "#0f1420", [TILE.STAIRS]: "#0f1420", [TILE.DOOR]: "#5a4326" },
+      dim:  { [TILE.WALL]: "#161b26", [TILE.FLOOR]: "#0a0d13", [TILE.STAIRS]: "#0a0d13", [TILE.DOOR]: "#2f2417" },
+      stairs: { lit: "#8be9fd", dim: "#3a5560" },
+      prop:   { lit: "#3a4560", dim: "#20293a" },
+      vignette: "180,30,50",
+    },
+    { // moss / green
+      lit:  { [TILE.WALL]: "#2b4632", [TILE.FLOOR]: "#0f1a12", [TILE.STAIRS]: "#0f1a12", [TILE.DOOR]: "#5a4326" },
+      dim:  { [TILE.WALL]: "#182619", [TILE.FLOOR]: "#0a110b", [TILE.STAIRS]: "#0a110b", [TILE.DOOR]: "#2f2417" },
+      stairs: { lit: "#7dffa0", dim: "#3a6045" },
+      prop:   { lit: "#3e6046", dim: "#223526" },
+      vignette: "150,150,30",
+    },
+    { // ember / red
+      lit:  { [TILE.WALL]: "#4a2c2c", [TILE.FLOOR]: "#1c0f0f", [TILE.STAIRS]: "#1c0f0f", [TILE.DOOR]: "#5a4326" },
+      dim:  { [TILE.WALL]: "#291818", [TILE.FLOOR]: "#110909", [TILE.STAIRS]: "#110909", [TILE.DOOR]: "#2f2417" },
+      stairs: { lit: "#ffb347", dim: "#6a4a30" },
+      prop:   { lit: "#6a3a34", dim: "#3a201e" },
+      vignette: "210,70,10",
+    },
+    { // void / violet
+      lit:  { [TILE.WALL]: "#3a2c4a", [TILE.FLOOR]: "#150f20", [TILE.STAIRS]: "#150f20", [TILE.DOOR]: "#5a4326" },
+      dim:  { [TILE.WALL]: "#201829", [TILE.FLOOR]: "#0d0913", [TILE.STAIRS]: "#0d0913", [TILE.DOOR]: "#2f2417" },
+      stairs: { lit: "#c58bff", dim: "#5a4570" },
+      prop:   { lit: "#55406e", dim: "#2e2340" },
+      vignette: "150,40,190",
+    },
+  ];
+  // Boss floors reuse their band but darker, so arriving on one feels different.
+  const darkenHex = (hex, f) => {
+    const n = parseInt(hex.slice(1), 16);
+    const r = Math.round(((n >> 16) & 255) * f), g = Math.round(((n >> 8) & 255) * f), b = Math.round((n & 255) * f);
+    return "#" + ((1 << 24) | (r << 16) | (g << 8) | b).toString(16).slice(1);
   };
+  const darkenBiome = (bi) => {
+    const map = (tbl) => { const o = {}; for (const k in tbl) o[k] = darkenHex(tbl[k], 0.6); return o; };
+    return {
+      lit: map(bi.lit), dim: map(bi.dim),
+      stairs: { lit: darkenHex(bi.stairs.lit, 0.75), dim: darkenHex(bi.stairs.dim, 0.75) },
+      prop:   { lit: darkenHex(bi.prop.lit, 0.6), dim: darkenHex(bi.prop.dim, 0.6) },
+      vignette: bi.vignette,
+    };
+  };
+  const BOSS_BIOMES = BIOMES.map(darkenBiome);
+  // Band index for a depth; cycles the four biomes forever in endless.
+  function biomeForDepth(depth) { return Math.floor((depth - 1) / 3) % BIOMES.length; }
+
+  // Decoration props (M8a): non-interactive glyphs scattered on FLOOR tiles from
+  // the COSMETIC rng stream only — they never touch walkability, FOV or pathing,
+  // and are drawn under entities. Computed once per floor and cached; the cosmetic
+  // stream is per-(seed,depth) and fed to nothing in the sim, so this is idempotent
+  // and free of hash impact. Returns a Map of tile index -> glyph.
+  const PROP_GLYPHS = [
+    { g: "▪", weight: 1 }, // pillar
+    { g: ",", weight: 3 }, // rubble
+    { g: '"', weight: 2 }, // moss
+  ];
+  function floorProps(floor) {
+    if (floor._props) return floor._props;
+    const props = new Map();
+    const rng = floor.rng.cosmetic;
+    for (let i = 0; i < floor.tiles.length; i++) {
+      if (floor.tiles[i] !== TILE.FLOOR) continue;
+      if (!rng.chance(0.07)) continue;
+      props.set(i, rng.weighted(PROP_GLYPHS).g);
+    }
+    floor._props = props;
+    return props;
+  }
 
   function draw() {
     ctx.fillStyle = "#05060a";
@@ -2409,6 +2843,11 @@ if (typeof document !== "undefined") {
     // (memory fades each step), Normal keeps remembered terrain. Entities are still
     // only ever drawn where currently visible, in every mode.
     const mapReveal = (DIFFICULTIES[game.difficulty] || DIFFICULTIES.normal).mapReveal;
+    // Pick the biome palette for this floor's depth band; boss floors get the
+    // darker variant. Props are the cosmetic decoration layer, drawn under all
+    // entities. Both are render-only.
+    const PALETTE = (RL.isBossFloor(game.depth) ? BOSS_BIOMES : BIOMES)[biomeForDepth(game.depth)];
+    const props = floorProps(game.floor);
     for (let y = 0; y < game.h; y++) {
       for (let x = 0; x < game.w; x++) {
         const i = idx(x, y);
@@ -2421,10 +2860,15 @@ if (typeof document !== "undefined") {
         ctx.fillStyle = (lit ? PALETTE.lit : PALETTE.dim)[t];
         ctx.fillRect(x * CELL, y * CELL, CELL - 1, CELL - 1);
         if (t === TILE.STAIRS) {
-          ctx.fillStyle = lit ? "#8be9fd" : "#3a5560"; // terrain glyph shows in memory
+          ctx.fillStyle = lit ? PALETTE.stairs.lit : PALETTE.stairs.dim; // terrain glyph shows in memory
           ctx.font = "bold 13px ui-monospace, monospace";
           ctx.textAlign = "center"; ctx.textBaseline = "middle";
           ctx.fillText(">", x * CELL + CELL / 2, y * CELL + CELL / 2 + 1);
+        } else if (t === TILE.FLOOR && props.has(i)) {
+          ctx.fillStyle = lit ? PALETTE.prop.lit : PALETTE.prop.dim; // cosmetic decoration, non-blocking
+          ctx.font = "12px ui-monospace, monospace";
+          ctx.textAlign = "center"; ctx.textBaseline = "middle";
+          ctx.fillText(props.get(i), x * CELL + CELL / 2, y * CELL + CELL / 2 + 1);
         } else if (t === TILE.DOOR) {
           ctx.fillStyle = lit ? "#e0a94d" : "#6a5330"; // a locked door reads brown among grey walls
           ctx.font = "bold 13px ui-monospace, monospace";
@@ -2501,13 +2945,15 @@ if (typeof document !== "undefined") {
     }
     ctx.restore(); // end shake transform
 
-    // Damage vignette: a red edge-glow that fades after the player is hurt.
+    // Damage vignette: an edge-glow that fades after the player is hurt, hued to
+    // the current biome so the depth band reads even mid-hit.
     const hk = 1 - (now() - fx.hurtAt) / HURT_MS;
     if (hk > 0) {
+      const vig = (RL.isBossFloor(game.depth) ? BOSS_BIOMES : BIOMES)[biomeForDepth(game.depth)].vignette;
       const cx = canvas.width / 2, cy = canvas.height / 2;
       const grd = ctx.createRadialGradient(cx, cy, canvas.width * 0.3, cx, cy, canvas.width * 0.72);
-      grd.addColorStop(0, "rgba(180,0,0,0)");
-      grd.addColorStop(1, `rgba(180,0,0,${(hk * 0.5).toFixed(3)})`);
+      grd.addColorStop(0, `rgba(${vig},0)`);
+      grd.addColorStop(1, `rgba(${vig},${(hk * 0.5).toFixed(3)})`);
       ctx.fillStyle = grd;
       ctx.fillRect(0, 0, canvas.width, canvas.height);
     }
@@ -2563,6 +3009,7 @@ if (typeof document !== "undefined") {
   }
   function continueEndless() {
     game.endless = true;
+    game._recordInfo = null;   // the endless leg is a separate run-end (its own history entry)
     game = descend(game);      // FINAL_DEPTH + 1; endless carried forward
     RL.advanceGame(game);
     hideEnd();
@@ -2572,33 +3019,48 @@ if (typeof document !== "undefined") {
   /* --- End-of-run screen (death or victory) ------------------------------ */
   function showEnd() {
     const g = game, won = g.won;
-    const row = (k, v) => `<tr><td class="k">${k}</td><td class="v">${v}</td></tr>`;
+    // Log the run to history (idempotent) and pull its score + PB flag.
+    const info = recordRun(g);
+    const sc = info.breakdown;
+    renderRuns(); // refresh the side panel so the just-finished run appears
+
+    const row = (k, v, cls) => `<tr><td class="k">${k}</td><td class="v${cls ? " " + cls : ""}">${v}</td></tr>`;
     const depthLabel = g.endless ? "Depth reached" : (won ? "Floors cleared" : "Depth reached");
-    let btns = "";
-    if (won) {
-      btns = `<button class="primary" id="continueBtn">Continue (Endless)</button>` +
-             `<button id="newSeedBtn">New seed</button>` +
-             `<button id="loadoutBtn">Change loadout</button>`;
-    } else {
-      btns = `<button class="primary" id="retryBtn">Retry this seed</button>` +
-             `<button id="newSeedBtn">New seed</button>` +
-             `<button id="loadoutBtn">Change loadout</button>`;
-    }
-    document.getElementById("overlayCard").innerHTML =
-      `<h2 class="${won ? "win" : ""}">${won ? "DUNGEON CLEARED" : "YOU DIED"}</h2>` +
-      `<div class="sub">${won ? "You beat the final boss!" : ""} seed <code>${escapeHtml(g.seed)}</code></div>` +
+    // Score breakdown teaches what the score rewards. Multiplier shown when it bites.
+    const multNote = sc.mult !== 1 ? ` <span class="muted">×${sc.mult}</span>` : "";
+    const breakdown =
       `<table>` +
         row(depthLabel, g.depth) +
-        row("Turns taken", g.turn) +
-        row("Enemies killed", g.kills) +
-        row("Items found", g.itemsFound) +
-      `</table>` +
+        row("Base", "+" + sc.completionBase) +
+        row("Speed", "+" + sc.timeBonus) +
+        row("Keys", "+" + sc.keyBonus) +
+        row("Kills", "+" + sc.killScore) +
+        row("Overflow", "+" + sc.overflowBonus) +
+      `</table>`;
+    const endlessNote = g.endless ? `<div class="sub" style="margin-top:-6px">endless — not on the campaign board</div>` : "";
+    const pbBadge = (info.isBest && !g.endless) ? `<div class="pbBadge">★ NEW PERSONAL BEST</div>` : "";
+
+    let btns = "";
+    if (won) btns += `<button class="primary" id="continueBtn">Continue (Endless)</button>`;
+    else     btns += `<button class="primary" id="retryBtn">Retry this seed</button>`;
+    btns += `<button id="shareBtn">Copy seed link</button>` +
+            `<button id="newSeedBtn">New seed</button>` +
+            `<button id="loadoutBtn">Change loadout</button>`;
+
+    document.getElementById("overlayCard").innerHTML =
+      `<h2 class="${won ? "win" : ""}">${won ? "DUNGEON CLEARED" : "YOU DIED"}</h2>` +
+      `<div class="sub">${won ? "You beat the final boss! · " : ""}seed <code>${escapeHtml(g.seed)}</code>${g.isDaily ? " · daily" : ""}</div>` +
+      `<div class="scoreBig">${sc.score.toLocaleString()}${multNote}<span class="scoreLbl"> pts</span></div>` +
+      pbBadge + endlessNote +
+      breakdown +
       `<div class="btns">${btns}</div>`;
     document.getElementById("overlay").classList.add("show");
     const retry = document.getElementById("retryBtn");
     if (retry) retry.onclick = () => newRun(g.seed);
     const cont = document.getElementById("continueBtn");
     if (cont) cont.onclick = () => continueEndless();
+    const share = document.getElementById("shareBtn");
+    if (share) share.onclick = () => shareSeed(g.seed, { classId: g.classId, difficulty: g.difficulty }, share);
     document.getElementById("newSeedBtn").onclick = () => newRun(pickSeed());
     const loadoutBtn = document.getElementById("loadoutBtn");
     if (loadoutBtn) loadoutBtn.onclick = () => showSetup();
@@ -2678,6 +3140,10 @@ if (typeof document !== "undefined") {
     const v = document.getElementById("seedInput").value.trim();
     newRun(v || pickSeed());
   };
+  // Daily run: derive today's UTC seed, ignoring whatever's in the seed box so
+  // the daily is always the daily. newRun echoes the resolved seed into the box
+  // and the "Current:" line, so the player sees exactly what to share.
+  document.getElementById("dailyGo").onclick = () => newRun(API.dailySeed());
   document.getElementById("seedInput").addEventListener("keydown", (e) => {
     if (e.key === "Enter") document.getElementById("seedGo").click();
   });
