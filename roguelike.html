@@ -1285,14 +1285,15 @@ function updateFlow(g) {
   return g.flow;
 }
 
-// Line of sight via Bresenham: any wall strictly between the endpoints blocks.
-// Enemies use this (not the player's FOV) so their aggro can't see through walls.
+// Line of sight via Bresenham: any sight-blocker (wall or closed door) strictly
+// between the endpoints blocks. Enemies use this (not the player's FOV) so their
+// aggro — and archer shots — can't see or fire through walls or locked doors.
 function hasLOS(tiles, x0, y0, x1, y1) {
   let dx = Math.abs(x1 - x0), dy = Math.abs(y1 - y0);
   let sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
   let err = dx - dy, x = x0, y = y0;
   while (true) {
-    if (!(x === x0 && y === y0) && !(x === x1 && y === y1) && tiles[idx(x, y)] === TILE.WALL) return false;
+    if (!(x === x0 && y === y0) && !(x === x1 && y === y1) && blocksSight(tiles[idx(x, y)])) return false;
     if (x === x1 && y === y1) return true;
     const e2 = 2 * err;
     if (e2 > -dy) { err -= dy; x += sx; }
@@ -2465,7 +2466,7 @@ if (typeof document !== "undefined") {
 
   // Bump this on every deploy — shown de-emphasised in the help panel so you can
   // confirm the home-screen app actually reloaded the latest build.
-  const APP_VERSION = "build 18 · 2026-09-04";
+  const APP_VERSION = "build 19 · 2026-09-04";
 
   let game;
   const debugState = { revealAll: false, flow: false };
